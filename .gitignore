@@ -1,0 +1,24 @@
+# 项目专用调试脚本（T113 GMAC 调优等，不属于通用串口工具本身）
+/t113_*.py
+/probe.py
+/probe2.py
+/probe3.py
+/phasef.py
+/phaseg.py
+/phaseh.py
+/microtest.py
+/ptest.py
+/diag.py
+/statecheck.py
+/finalverify.py
+/varchk.py
+/cpucheck.py
+/demo2proc.py
+# 运行产物与日志
+/serial_log.txt
+/results.jsonl
+/logs/
+/__pycache__/
+# 编辑器/系统残留
+/*.bak
+/*.lnk
