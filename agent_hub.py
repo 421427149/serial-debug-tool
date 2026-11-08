@@ -47,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.0"
+HUB_VERSION = "2.1"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -117,7 +117,7 @@ class Hub:
 
     def __init__(self, host, listen_port, scan_min, scan_max,
                  probe_timeout=1.0, forward_timeout=30.0, token="", boards_path=None,
-                 audit_path=AUDIT_DEFAULT):
+                 audit_path=AUDIT_DEFAULT, ignore_ports=()):
         if scan_min <= listen_port <= scan_max:
             raise SystemExit(f"[ERROR] 监听端口 {listen_port} 落在扫描区间 "
                              f"[{scan_min},{scan_max}] 内, 会自己发现自己, 请换端口")
@@ -129,6 +129,7 @@ class Hub:
         self.forward_timeout = forward_timeout
         self.token = token or ""
         self.boards_path = boards_path
+        self.ignore_ports = frozenset(ignore_ports)   # 兼容门/转发器端口, 收编会造重复Tab
         self.audit_path = audit_path
         if audit_path:
             os.makedirs(os.path.dirname(audit_path), exist_ok=True)
@@ -153,7 +154,8 @@ class Hub:
         now = time.monotonic()
         if self._disc_cache and now - self._disc_cache[0] < self.DISC_TTL:
             return self._disc_cache[1]
-        ports = range(self.scan_min, self.scan_max + 1)
+        ports = [p for p in range(self.scan_min, self.scan_max + 1)
+                 if p not in self.ignore_ports]
         found = [inst for inst in self._pool.map(self._probe, ports) if inst]
         self._disc_cache = (now, found)
         self._log_change(found)
@@ -684,9 +686,11 @@ const term=new Terminal({cursorBlink:true,fontFamily:'Consolas,"Courier New",mon
 const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open($('term'));fit.fit();
 addEventListener('resize',()=>fit.fit());
 let tabs=[],active=null,raw=false,line='',hist=[],hi=0;const state={};
-async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error('HTTP '+r.status);
+async function jget(u){const r=await fetch(u,{signal:AbortSignal.timeout(8000)});
+ if(!r.ok)throw new Error('HTTP '+r.status);
  const j=await r.json();if(!j.ok)throw new Error(j.error||'错误');return j.data}
 async function jpost(u,b,src){const r=await fetch(u,{method:'POST',
+ signal:AbortSignal.timeout(8000),
  headers:{'Content-Type':'application/json','X-Hub-Src':src||'web'},
  body:JSON.stringify(b)});const j=await r.json();
  if(!j.ok)throw new Error(j.error||'错误');return j.data}
@@ -888,11 +892,14 @@ def main():
                         help=f"板名映射 JSON, 默认 {BOARDS_DEFAULT}")
     parser.add_argument("--audit", default=AUDIT_DEFAULT, metavar="FILE",
                         help=f"AI 活动审计 JSONL(空串关闭), 默认 {AUDIT_DEFAULT}")
+    parser.add_argument("--ignore-ports", default="8321", metavar="PORTS",
+                        help="扫描时忽略的端口(逗号分隔; 兼容门/转发器收编会造重复Tab), 默认 8321")
     args = parser.parse_args()
 
     hub = Hub(args.host, args.listen, args.scan_min, args.scan_max,
               probe_timeout=args.probe_timeout, forward_timeout=args.forward_timeout,
-              token=args.token, boards_path=args.boards, audit_path=args.audit)
+              token=args.token, boards_path=args.boards, audit_path=args.audit,
+              ignore_ports={int(x) for x in args.ignore_ports.split(",") if x.strip()})
     server = ThreadingHTTPServer((args.host, args.listen), _Handler)
     server.hub = hub
     server.daemon_threads = True
