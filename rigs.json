@@ -8,7 +8,12 @@
       "prompt": "root@TQ536",
       "power": {
         "method": "sysfs-gpio",
-        "gpios": [196, 197, 388, 389],
+        "gpios": [
+          196,
+          197,
+          388,
+          389
+        ],
         "on_value": 1,
         "off_value": 0,
         "discharge_s": 20,
@@ -25,10 +30,16 @@
         "note": "350b=Loader/MaskROM(两态同PID), 需 upgrade_tool ld 判 Mode; 系统活=0006"
       },
       "bound_at": "2026-11-08",
-      "bound_by": "t536-3588-power-rig 记忆(11-02 拓扑) + hub hint root@TQ3588 双证"
+      "bound_by": "t536-3588-power-rig 记忆(11-02 拓扑) + hub hint root@TQ3588 双证",
+      "enter_loader_cmd": "loader",
+      "enter_loader_note": "固件init横幅记载: press ENTER for shell | Ctrl+L or `loader` -> Loader mode (2026-11-08 实测横幅存在)"
     },
     "_history": [
-      {"target": "TQ3588 console@1.4.3", "until": "2026-11-07", "note": "刷机/挪线后 3588 控制台移到 1.4.4"}
+      {
+        "target": "TQ3588 console@1.4.3",
+        "until": "2026-11-07",
+        "note": "刷机/挪线后 3588 控制台移到 1.4.4"
+      }
     ]
   }
 }

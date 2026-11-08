@@ -11,6 +11,7 @@
     rigctl rig-A on            # 开机(4 路 GPIO 全写 1, 幂等)
     rigctl rig-A off           # 关机(全写 0)
     rigctl rig-A coldboot      # 关机 → 放电 → 开机(冷启动, 全程约 discharge_s+5s)
+    rigctl rig-A enter-loader  # 板型核对 → reboot loader → 轮询USB判定模式(全自动)
     rigctl rig-A bind          # 重探测受控板: 关电盯哪个串口灭→开电盯哪个醒,
                                # 结论自动写回 rigs.json 的 target(换板/挪线后跑这个)
     rigctl --selftest          # 链路归一化自检, 不碰设备
@@ -188,6 +189,88 @@ def act_power(rig_name, rig, value, label):
     print(f"{rig_name}: {label} 完成(GPIO 全写 {value}, 经实例 {agent_port})")
 
 
+def _lsusb():
+    try:
+        return subprocess.run(["lsusb"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+USB_PID_MODE = {"0006": "运行态(adb gadget)", "350b": "Loader 下载态", "320b": "MaskROM"}
+
+
+def usb_mode():
+    """主机侧 2207 设备的 PID → 模式判定(无 upgrade_tool 时按 PID 映射, 见闸门口诀)。"""
+    pids = re.findall(r"ID\s+2207:([0-9a-f]{4})", _lsusb(), re.I)
+    if not pids:
+        return None
+    pid = pids[0].lower()
+    return f"2207:{pid} → {USB_PID_MODE.get(pid, '未知PID')}"
+
+
+def act_enter_loader(rig_name, rig):
+    """全自动进 Loader: 板型核对 → reboot loader → 轮询 USB 枚举判定模式。
+
+    依据本 SDK rk3588s.dtsi 的 reboot-mode 节点: mode-loader=BOOT_BL_DOWNLOAD,
+    `reboot loader` 是内核正式支持路径; MaskROM 无软件入口(mode-maskrom 不存在)。
+    """
+    thit = find_instance(console_chain_of_rig(rig, "target"))
+    if not thit:
+        raise RigError(3, "受控板控制台无在线实例, 无法下发 reboot loader")
+    ap = thit[0]
+    model = send_and_read(ap, "cat /proc/device-tree/model", settle=1.0)
+    print(f"{rig_name}: 板型核对: {(model or '').strip()[-80:]!r}")
+    cmd = (rig.get("target") or {}).get("enter_loader_cmd")
+    if cmd:
+        print(f"{rig_name}: 用固件自带入口 {cmd!r}(init 横幅记载)...")
+        send_and_read(ap, cmd, settle=1.0)
+    else:
+        send_and_read(ap, "reboot loader", settle=1.0)
+    print(f"{rig_name}: 已下发, 盯 USB 枚举判定模式(至多 45s; loader 态串口静默属正常)...")
+    for _ in range(24):
+        time.sleep(2)
+        mode = usb_mode_for(rig)
+        if mode:
+            break
+    if not mode:
+        print(f"{rig_name}: 45s 未见本板枚举(adb 序列号/350b/320b 均无) —— "
+              f"下载线未接主机时 Loader 态不可见, 属预期; 烧录需接下载线+upgrade_tool/RKDevTool")
+        return
+    print(f"{rig_name}: USB {mode}")
+    if "Loader" in mode:
+        print(f"{rig_name}: 已在 Loader 态; 烧录后复位: python3 rigctl.py {rig_name} coldboot")
+
+
+def _adb_devices_l():
+    try:
+        return subprocess.run(["adb", "devices", "-l"], capture_output=True, text=True,
+                              timeout=15).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def usb_mode_for(rig):
+    """判定受控板下载口模式——以 adb 序列号认主, 杜绝总线上其他 2207 设备污染判定
+    (2026-11-08 实训: SSI_17 设备占 2207:0006, 曾让 rig-A 被误判为运行态)。
+    运行态: adb devices -l 按序列号匹配(链路一并报出); Loader/MaskROM: adb 不列,
+    扫 lsusb 的 350b/320b(需下载线接主机才可见, 无 upgrade_tool 时按 PID 口诀)。"""
+    adb_serial = (rig.get("target") or {}).get("adb_serial", "")
+    if adb_serial:
+        for line in _adb_devices_l().splitlines():
+            if adb_serial in line:
+                m = re.search(r"usb:\d+-([\d.]+)", line)
+                chain = m.group(1) if m else "?"
+                return f"运行态(adb@链路{chain}, 序列号匹配)"
+    pids = re.findall(r"ID\s+2207:([0-9a-f]{4})", _lsusb(), re.I)
+    download = [p.lower() for p in pids if p.lower() in ("350b", "320b")]
+    if download:
+        pid = download[0]
+        return f"2207:{pid} → {USB_PID_MODE.get(pid)}"
+    if pids:
+        return None   # 总线上有别的 2207 设备, 但都不是本板 → 视为未见
+    return None
+
+
 def usb_alive(target):
     vidpid = (target.get("alive_check") or {}).get("usb_vid_pid")
     if not vidpid:
@@ -220,13 +303,11 @@ def act_status(rig_name, rig):
         parts.append(f"受控{tgt['name']} 串口 ✔(实例{thit[0]} rx={tab['rx_count']})")
     else:
         parts.append(f"受控{tgt['name']} 串口 ✘ 无实例")
-    alive = usb_alive(tgt)
-    if alive is True:
-        parts.append(f"USB {tgt['alive_check']['usb_vid_pid']} ✔")
-    elif alive is False:
-        parts.append(f"USB {tgt['alive_check'].get('usb_vid_pid')} ✘(未枚举; loader态见alive_check.note)")
+    mode = usb_mode_for(rig)
+    if mode:
+        parts.append(f"USB {mode} ✔")
     else:
-        parts.append("USB 判活未配置/lsusb不可用")
+        parts.append("USB 未见本板(下载线未接主机/未枚举)")
     print(f"{rig_name}: " + " | ".join(parts))
 
 
@@ -343,6 +424,8 @@ def main():
         print(f"{name}: 冷启动已触发, 盯受控串口看 boot 洪流")
     elif action == "bind":
         act_bind(name, rig, rigs_path, rigs)
+    elif action == "enter-loader":
+        act_enter_loader(name, rig)
     else:
         raise RigError(2, f"未知动作 {action!r}(status/on/off/coldboot/bind)")
 
