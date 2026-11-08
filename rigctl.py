@@ -173,7 +173,59 @@ def power_cmdline(rig, value):
 
 # ---------------------------------------------------------------- 动作
 
+# ------------------------------------------------ H503 A5 协议(4字节帧+回帧)
+
+H503_ACK = {0: "成功", 1: "长度错", 2: "校验错", 3: "状态错"}
+
+
+def h503_frame(channel, state):
+    body = bytes([0xA5, channel, state])
+    return body + bytes([sum(body) & 0xFF])          # 校验 = 前三字节之和 & 0xFF
+
+
+def _h503_xact(cmd_port, frame, timeout=1.5):
+    """打开命令口发一帧读回帧( exclusive 独占, 用完即关)。CDC 无波特率意义。"""
+    import serial
+    with serial.Serial(cmd_port, timeout=timeout) as s:
+        s.reset_input_buffer()
+        s.write(frame)
+        return s.read(4)
+
+
+def h503_probe(cmd_port):
+    """无副作用探活: 故意发截断 3 字节帧 A5 01 00, 应答回 a5 01 01 a7(长度错)。"""
+    try:
+        reply = _h503_xact(cmd_port, bytes([0xA5, 0x01, 0x00]))
+    except (OSError, ValueError) as e:
+        return False, f"打不开命令口: {e}"
+    return reply.hex() == "a50101a7", reply.hex()
+
+
+def h503_power(cmd_port, channel, state):
+    """单通道 ON/OFF(完整 4 字节帧——探活帧≠控制帧, 别抄 3 字节格式)。"""
+    if channel is None:
+        raise RigError(2, "电源通道未绑定: 先跑 bind 差分或人工确认后填 rigs.json")
+    try:
+        reply = _h503_xact(cmd_port, h503_frame(channel, state))
+    except (OSError, ValueError) as e:
+        raise RigError(4, f"命令口读写失败: {e}")
+    if len(reply) < 4 or reply[0] != 0xA5 or reply[1] != channel:
+        raise RigError(4, f"回帧异常: {reply.hex()!r}")
+    if reply[2] != 0:
+        raise RigError(4, f"回帧错误码 {reply[2]}({H503_ACK.get(reply[2], '?')})")
+    return f"回帧 {reply.hex()} 成功"
+
+
 def act_power(rig_name, rig, value, label):
+    ctrl = rig.get("controller") or {}
+    if ctrl.get("power", {}).get("method") == "h503-a5":
+        # 上电顺序纪律: H503 的 USB2/USB3 口供电受通道 0x01 控制, 先开它再开目标板通道
+        usb_ch = ctrl.get("usb_port_channel")
+        if value == ctrl["power"].get("on_value", 1) and usb_ch is not None:
+            h503_power(ctrl["cmd_port"], usb_ch, ctrl["power"].get("on_value", 1))
+        msg = h503_power(ctrl["cmd_port"], ctrl["power"].get("channel"), value)
+        print(f"{rig_name}: {label} 完成(通道 0x{(ctrl['power'].get('channel') or 0):02X}, {msg})")
+        return
     hit = find_instance(console_chain_of_rig(rig, "controller"))
     if not hit:
         raise RigError(3, f"{rig_name} 的控制器控制台({console_chain_of_rig(rig, 'controller')}) "
@@ -271,6 +323,76 @@ def usb_mode_for(rig):
     return None
 
 
+def _diff_snapshot():
+    """观察源快照: adb 序列号 + lsusb VID:PID + hub 各实例账本字节数。"""
+    devs = {}
+    for line in _adb_devices_l().splitlines():
+        m = re.match(r"^(\S+)\s+\S+\s+usb:(\d+-[\d.]+)", line)
+        if m:
+            devs[f"adb:{m.group(1)}"] = "在线"
+    for line in _lsusb().splitlines():
+        m = re.search(r"ID\s+([0-9a-f]{4}):([0-9a-f]{4})", line, re.I)
+        if m:
+            devs[f"usb:{m.group(1).lower()}:{m.group(2).lower()}"] = "枚举"
+    for t in hub_tabs():
+        try:
+            cb = _api(f"http://127.0.0.1:{t['agent_port']}", "GET", "/api/info",
+                      timeout=5)["capture_bytes"]
+            devs[f"tty:{t['agent_port']}({t['title']})"] = cb
+        except Exception:
+            pass
+    return devs
+
+
+def act_bind_h503(rig_name, rig, rigs_path, all_rigs, confirmed=False):
+    """H503 通道↔板绑定: 断电差分法(金标准, skill 固化的 2026-10-27 事故对策)。
+
+    ⚠ 破坏性: 逐路断电观察, 且 H503 无状态查询命令——扫完各路保持 OFF,
+    原上电状态不可恢复(需人工按需重开)。故必须 --yes 显式确认。
+    """
+    ctrl = rig["controller"]
+    if not confirmed:
+        raise RigError(2, f"差分会逐路断电且结束后保持全 OFF(原状态不可恢复); "
+                          f"确认接好线后跑: rigctl.py {rig_name} bind --yes")
+    ok, msg = h503_probe(ctrl["cmd_port"])
+    if not ok:
+        raise RigError(3, f"H503 探活失败: {msg}")
+    binding = None
+    for ch in range(0x02, 0x06):        # 0x02..0x05; 0x01 是 USB 口供电不参与绑定
+        a = _diff_snapshot()
+        h503_power(ctrl["cmd_port"], ch, 0)
+        time.sleep(5)
+        b = _diff_snapshot()
+        gone = [k for k, v in a.items() if k not in b and not isinstance(v, int)]
+        gone_tty = [k for k in a if k not in b and k.startswith("tty:")]
+        print(f"通道 0x{ch:02X} 断电后消失: {gone + gone_tty or '(无变化→空通道)'}")
+        if gone or gone_tty:
+            binding = ch
+            print(f"{rig_name}: 绑定命中 → 通道 0x{ch:02X} (记录进 rigs.json)")
+            for k in gone:
+                if k.startswith("adb:"):
+                    rig["target"]["adb_serial"] = k[4:]
+            for k in gone_tty:
+                ap = k.split("(")[0][4:]
+                tab = next((t for t in hub_tabs() if str(t["agent_port"]) == ap), None)
+                if tab:
+                    rig["target"]["console"] = hub_chain(tab["port"]) or tab["port"]
+                    rig["target"]["baud"] = tab["baud"]
+            rig["target"]["name"] = f"通道0x{ch:02X}目标板"
+            rig["target"]["bound_at"] = time.strftime("%Y-%m-%d %H:%M")
+            rig["target"]["bound_by"] = "rigctl bind 差分"
+            break
+        # 空通道保持 OFF, 继续下一路
+    ctrl["power"]["channel"] = binding
+    save_rigs(rigs_path, all_rigs)
+    if binding is None:
+        print(f"{rig_name}: 0x02..0x05 全部无差分 —— 没探到目标板; "
+              f"确认目标板电源线接的是 H503 哪路(5V2/5V3/12V4/12V5), 或直接人工填 channel")
+    else:
+        print(f"{rig_name}: 现在可 status/on/off/coldboot 全套操作; "
+              f"注意各路当前为 OFF(差分副作用), 按需 python3 rigctl.py {rig_name} on")
+
+
 def usb_alive(target):
     vidpid = (target.get("alive_check") or {}).get("usb_vid_pid")
     if not vidpid:
@@ -290,6 +412,23 @@ def usb_alive(target):
 
 def act_status(rig_name, rig):
     parts = []
+    ctrl = rig.get("controller") or {}
+    if ctrl.get("power", {}).get("method") == "h503-a5":
+        ok, msg = h503_probe(ctrl["cmd_port"])
+        ch = ctrl["power"].get("channel")
+        parts.append(f"控制器{ctrl.get('name','H503')} "
+                     f"{'✔探活通过('+msg+')' if ok else '✘探活失败('+msg+')'}"
+                     + (f" 通道0x{ch:02X}" if ch is not None else " 通道未绑定"))
+        thit = find_instance(console_chain_of_rig(rig, "target"))
+        tgt = rig.get("target") or {}
+        if thit:
+            parts.append(f"受控{tgt.get('name','?')} 串口 ✔(实例{thit[0]})")
+        else:
+            parts.append(f"受控{tgt.get('name','?')} 串口 ✘ 无实例")
+        mode = usb_mode_for(rig)
+        parts.append(f"USB {mode}" if mode else "USB 未见本板(未接下载线/未枚举)")
+        print(f"{rig_name}: " + " | ".join(parts))
+        return
     hit = find_instance(console_chain_of_rig(rig, "controller"))
     if hit:
         _ap, tab = hit
@@ -423,7 +562,10 @@ def main():
         act_power(name, rig, p["on_value"], "开机")
         print(f"{name}: 冷启动已触发, 盯受控串口看 boot 洪流")
     elif action == "bind":
-        act_bind(name, rig, rigs_path, rigs)
+        if (rig.get("controller") or {}).get("power", {}).get("method") == "h503-a5":
+            act_bind_h503(name, rig, rigs_path, rigs, confirmed="--yes" in args)
+        else:
+            act_bind(name, rig, rigs_path, rigs)
     elif action == "enter-loader":
         act_enter_loader(name, rig)
     else:

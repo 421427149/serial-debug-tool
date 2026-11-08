@@ -41,5 +41,26 @@
         "note": "刷机/挪线后 3588 控制台移到 1.4.4"
       }
     ]
+  },
+  "rig-B": {
+    "controller": {
+      "name": "H503开关机控制板",
+      "cmd_port": "/dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_005F003B3032510235343637-if00",
+      "usb_port_channel": 1,
+      "power": {
+        "method": "h503-a5",
+        "channel": null,
+        "on_value": 1,
+        "off_value": 0,
+        "discharge_s": 25,
+        "note": "A5协议4字节帧+回帧校验; 通道0x01=USB2/USB3口供电(先开), 0x02=5V2, 0x03=5V3, 0x04=12V4, 0x05=12V5; 0x00多通道是整体赋值勿用; 裸ON无边沿不生效(OFF→放电≥25s→ON); 通道↔板绑定未探明, 须断电差分法或人工确认后填 channel"
+      }
+    },
+    "target": {
+      "name": "待差分绑定",
+      "console": null,
+      "baud": null,
+      "note": "目标板可能是 CH344Q 四串口(ttyACM1~4, by-path 1.3.3.x)之一; 绑定后补 console/baud/adb_serial"
+    }
   }
 }
