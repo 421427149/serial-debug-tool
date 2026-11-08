@@ -47,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.1"
+HUB_VERSION = "2.2"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -631,6 +631,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_bytes(self, status, data, ctype="application/json; charset=utf-8"):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")   # 页面/接口永不缓存, 杜绝旧壳挂新API
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
