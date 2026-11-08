@@ -2,7 +2,7 @@
   "_说明": "控制组合(rig)登记表: controller=治具常量(永不因换板而变), target=受控槽位(换板/挪线后改这里或跑 rigctl <rig> bind 重探测, 旧绑定进 _history)。console 键写 by-path 链路段(如 1.4.2), 与 boards.json/adbq 同一坐标系; rigctl 也认完整 by-path 串和 ttyUSBx 过渡名",
   "rig-A": {
     "controller": {
-      "name": "TQ536治具",
+      "name": "TQ536",
       "console": "1.4.2",
       "baud": 115200,
       "prompt": "root@TQ536",
