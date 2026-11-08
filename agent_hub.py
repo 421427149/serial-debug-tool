@@ -419,8 +419,14 @@ class Hub:
             entry = {"name": name, "power": {"method": p.get("method"),
                                              "channel": p.get("channel")}}
             if str(p.get("method", "")).startswith("h503"):
-                proto, msg = self._detect_safe(R, ctrl.get("cmd_port"), name)
-                entry["controller"] = {"ok": bool(proto), "detail": f"{proto or '×'} {msg}"}
+                port_ok = os.path.exists(ctrl.get("cmd_port") or "")
+                if not port_ok:
+                    entry["controller"] = {"ok": False, "detail": "命令口不存在(板没插/掉线)"}
+                else:
+                    proto, msg = self._detect_safe(R, ctrl.get("cmd_port"), name)
+                    entry["controller"] = {
+                        "ok": True,   # 口在即算在; 协议探测只是加分项(电源动作时还会再探)
+                        "detail": f"{proto or '口在·协议探测被占'}({msg})"}
             else:
                 tab = self._tab_by_console(R, ctrl.get("console"))
                 entry["controller"] = {
