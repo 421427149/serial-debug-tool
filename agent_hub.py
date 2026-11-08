@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "1.8"
+HUB_VERSION = "1.9"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -625,6 +625,57 @@ function lineKey(d){const s=state[active];
   else if(ch>=' '||ch==='\t'){line+=ch;term.write(ch)}}}
 term.onData(d=>{if(active===null)return;
  if(raw){rawSend(d)}else{lineKey(d)}});
+const TL=[   // AI 命令人话翻译规则(首条命中即用, $1..$9=正则分组); 想加词在这补一行
+ [/reboot|shutdown|halt|poweroff/i,"重启/关机 ⚠"],
+ [/rm\s+(-[a-zA-Z]+\s+)*-r/i,"递归删除 ⚠"],
+ [/dd\s+if=/i,"裸设备读写 ⚠"],
+ [/upgrade_tool|rkdeveloptool|fastboot|flashcp/i,"烧录/刷机 ⚠"],
+ [/mkfs/i,"格式化 ⚠"],
+ [/for\s+g\s+in[\s\S]*gpio/,"批量写继电器GPIO(控受控板电源)"],
+ [/gpio(196|197|388|389)/,"继电器GPIO$1(RIG-A控电)"],
+ [/relay_test\.sh\s+(on|off)/,"继电器全$1(控受控板电源)"],
+ [/\/sys\/class\/gpio/,"操作GPIO"],
+ [/thermal_zone\d+\/temp/,"读SoC温度"],
+ [/dmesg/i,"看内核日志"],
+ [/journalctl/,"看系统日志"],
+ [/systemctl\s+restart\s+(\S+)/,"重启服务 $1"],
+ [/systemctl\s+(stop|start|enable|disable)\s+(\S+)/,"$1 服务 $2"],
+ [/systemctl\s+status\s+(\S+)/,"看服务 $1 状态"],
+ [/(insmod|modprobe)\s+(\S+)/,"加载模块 $2"],
+ [/rmmod\s+(\S+)/,"卸载模块 $1"],
+ [/lsusb/,"枚举USB设备"],
+ [/\badb\b/,"adb调试"],
+ [/apt-get|apt\s+install|pip3?\s+install/,"装软件包"],
+ [/devmem/,"直读写物理寄存器"],
+ [/i2c(det|get|set)/,"I2C $1"],
+ [/tail\s+-f/,"跟踪日志"],
+ [/cat\s+([^\s|;]+)/,"读 $1"],
+ [/echo\s+[^>]*>\s*([^\s]+)/,"写 $1"],
+ [/ls\b/,"列目录"],
+ [/\bps\b|\btop\b|\bfree\b/,"看进程/内存"],
+ [/\bdf\b|\bdu\b/,"看磁盘"],
+ [/ping/,"网络连通测试"],
+ [/ip\s+addr|ifconfig/,"看网卡"],
+ [/ethtool/,"看网口"],
+ [/sync/,"刷盘"],
+];
+const TL_ALL=[   // 整条命令优先规则(拆段前全文匹配, 复合命令的语义靠它不碎)
+ [/for\s+\w+\s+in[\s\S]*\/sys\/class\/gpio[\s\S]*\/value/,"批量写继电器GPIO(控受控板电源)"],
+];
+function tl(cmd){cmd=cmd||"";
+ for(const[re,t]of TL_ALL){const m=cmd.match(re);
+  if(m)return t.replace(/\$(\d)/g,(_,i)=>m[i]||"")}
+ const all=cmd.split(/[;\n]/).map(s=>s.trim()).filter(Boolean);
+ const segs=all.slice(0,4);
+ const g1=p=>{for(const[re,t]of TL){const m=p.match(re);
+   if(m)return t.replace(/\$(\d)/g,(_,i)=>m[i]||"")}return null};
+ const out=segs.map(seg=>{const parts=seg.split("|").map(s=>s.trim());
+  let g=g1(parts[0])||(parts.length>1&&g1(parts[parts.length-1]))||"执行shell";
+  if(parts.length>1)g+="(经管道)";return g});
+ let res=out.join(" → ");
+ if(all.length>4)res+=" → …(共"+all.length+"段)";
+ return res}
+
 function devOf(t){const m=(t||'').match(/usb-([\d.:]+)/);
  if(m){const g=m[1].split(':');return g.length>1?g[1]:g[0]}
  const b=(t||'').split('/').pop();return /^tty/.test(b)?b:null}
@@ -638,11 +689,14 @@ async function pollAI(){try{const d=await jget('/api/audit?n=30');
   if(!t||devOf(t.port)!==r.dev)continue;
   const s=state[active];if(!s)continue;
   const fmt=(r.out||'').replace(/; /g,';\r\n    ');  // 长组合命令按 ; 折行解析
-  const chunk='\r\n\x1b[33m⟦AI➤ '+fmt+'⟧\x1b[0m\r\n';
-  term.write(chunk);s.buf+=chunk.replace(/\x1b\[[0-9;?]*[A-Za-z]/g,'');
+  const g=tl(r.out||'');const gc=/⚠/.test(g)?'\x1b[91m':'\x1b[90m';
+  const plain='\r\n⟦AI➤ '+fmt+'⟧\r\n'+(g?'⟦翻译⟧ '+g+'\r\n':'');
+  term.write('\r\n\x1b[33m⟦AI➤ '+fmt+'⟧\x1b[0m\r\n'+
+             (g?gc+'⟦翻译⟧ '+g+'\x1b[0m\r\n':''));
+  s.buf+=plain;
   if(s.buf.length>200000)s.buf=s.buf.slice(-150000);
-  $('ai').textContent=($('ai').textContent+'\n'+r.t+' ['+r.board+'] AI发 '+fmt)
-   .split('\n').slice(-8).join('\n')}}
+  $('ai').textContent=($('ai').textContent+'\n'+r.t+' ['+r.board+'] AI发 '+fmt
+   +(g?'  ┋ '+g.slice(0,60):'')).split('\n').slice(-8).join('\n')}}
  catch(e){}}
 $('ai').ondblclick=()=>$('ai').style.display=$('ai').style.display==='none'?'block':'none';
 setInterval(pollTabs,3000);setInterval(pollAI,2500);
