@@ -349,6 +349,7 @@ class SerialTool:
         self.budget = budget if budget and budget > 0 else (1 << 30)
         self.dtr_on = True
         self.rts_on = True
+        self.agent = None          # AI Agent 通道(--agent-http 时由 agent_http.attach 注入)
 
         self.ser = None            # 当前串口对象(仅主线程创建/关闭)
         self.running = True
@@ -407,6 +408,8 @@ class SerialTool:
 
     def note(self, msg):
         self.notices.append(msg)
+        if self.agent:               # 系统消息同步入 AI 事件流(开关串口/切波特率/异常都在其中)
+            self.agent.note_event(msg)
 
     def draw_input(self):
         """在行首重绘用户正在输入的内容(仅 ANSI 模式)。"""
@@ -519,7 +522,8 @@ class SerialTool:
 
     # ------------------------------------------------------------ 发送
 
-    def serial_write(self, data):
+    def serial_write(self, data, source=None):
+        """发送唯一入口; source=None 按线程自动判定来源(主线程=人工, 其他=agent 通道)。"""
         with self.ser_lock:
             s = self.ser
         if s is None:
@@ -533,6 +537,8 @@ class SerialTool:
             return False
         with self.stat_lock:
             self.tx_total += len(data)
+        if self.agent:
+            self.agent.tx_event(data, source)
         return True
 
     def send_line(self, line):
@@ -1164,6 +1170,8 @@ class SerialTool:
                 self.flush_capture()  # 定期落盘, 程序被强杀最多丢 50ms 数据
                 next_tick = now + TICK
             self.drain_notices()
+            if self.agent:
+                self.agent.drain_cmds()   # AI 请求的操作在主线程执行(串口对象只在主线程动)
             if self.kbd.ok:
                 n = 0
                 try:
@@ -1180,6 +1188,9 @@ class SerialTool:
             time.sleep(0.004)
 
     def close_all(self):
+        if self.agent:   # 先给 AI 事件流留下 exit 事件并停服务, 再做本地清理
+            self.agent.exit_event()
+            self.agent.stop()
         self.kbd.close()  # 先恢复终端(行编辑/回显), 后面的退出提示才能正常显示
         self.stop.set()
         with self.ser_lock:
@@ -1280,6 +1291,13 @@ def main():
     ap.add_argument("--budget", type=int, default=DEFAULT_BUDGET,
                     help="每 50ms 最多打印的字节数, 默认 65536")
     ap.add_argument("--no-color", action="store_true", help="关闭 ANSI 颜色/重绘")
+    ap.add_argument("--agent-http", nargs="?", const=8321, type=int, default=None, metavar="PORT",
+                    help="开启本地 AI Agent 通道(默认端口 8321): AI 可经 HTTP 按偏移账本读"
+                         "接收流/收事件/发指令, 与本地屏显互不依赖(人看终端的同时 AI 也能看)")
+    ap.add_argument("--agent-host", default="127.0.0.1",
+                    help="AI 通道监听地址, 默认仅本机 127.0.0.1 (改 0.0.0.0 需自担风险)")
+    ap.add_argument("--agent-token", default="",
+                    help="AI 通道访问令牌, 设置后请求须带 X-Agent-Token 头")
     args = ap.parse_args()
 
     if args.list:
@@ -1296,10 +1314,21 @@ def main():
         signal.signal(signal.SIGHUP, lambda *_: sys.exit(0))
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
+    capture = not args.no_capture
+    if args.agent_http and not capture:
+        capture = True   # AI 通道的偏移账本就是会话捕获文件, 强制开启否则账本不完整
+        print("提示: --agent-http 依赖会话捕获作数据账本, 已强制开启(忽略 --no-capture)")
+
     t = SerialTool(port=args.port, baud=args.baud, nl=args.nl, enc=args.enc,
                    flow=args.flow, hex_mode=args.hex, hexsend=args.hexsend,
                    ts=args.ts, color=not args.no_color, budget=args.budget,
-                   log_path=args.log, capture=not args.no_capture)
+                   log_path=args.log, capture=capture)
+    if args.agent_http:
+        try:
+            from agent_http import attach
+            attach(t, port=args.agent_http, host=args.agent_host, token=args.agent_token)
+        except OSError as e:
+            print(f"AI Agent 通道启动失败({e}), 继续以普通模式运行")
     try:
         if not args.port:
             choose_interactive(t)
