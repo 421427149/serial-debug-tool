@@ -31,10 +31,13 @@ mcp_bridge.py 不用改, ZCode 只配一个 MCP 入口就能看所有板子:
 """
 
 import argparse
+import contextlib
 import http.client
+import io
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -44,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "1.9"
+HUB_VERSION = "2.0"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -130,6 +133,10 @@ class Hub:
         if audit_path:
             os.makedirs(os.path.dirname(audit_path), exist_ok=True)
         self._disc_cache = None           # (monotonic, 实例列表) 短 TTL 缓存
+        self._rigctl = None               # 延迟 import 的 rigctl 模块
+        self._rig_out = {}                # 组合名 -> 最近一次网页动作输出
+        self._rig_lock = threading.Lock() # 电源动作串行化
+        self._usb_cache = {}              # 组合名 -> (monotonic, usb模式) 10s 缓存
         self._boards_cache = (None, {})   # (mtime, 映射表), mtime 变了才重读(免重启)
         self._hint_cache = {}             # agent_port -> (capture_bytes, hint)
         self._pool = ThreadPoolExecutor(PROBE_WORKERS)
@@ -351,6 +358,103 @@ class Hub:
         self._audit(inst, action, body, payload, status, src)
         return status, payload
 
+    def _rig_mod(self):
+        if self._rigctl is None:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import rigctl as _R
+            self._rigctl = _R
+        return self._rigctl
+
+    def _rigs_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "rigs.json")
+
+    def _tab_by_console(self, R, key):
+        if not key:
+            return None
+        try:
+            tabs = self.list_tabs()["tabs"]
+        except AgentApiError:
+            return None
+        for tab in tabs:
+            try:
+                if R.port_matches(tab.get("port"), key):
+                    return tab
+            except Exception:
+                continue
+        return None
+
+    def rigs_status(self):
+        """组合(rig)状态聚合: 控制器/受控/USB 三项, 供网页状态条; 全程只读。"""
+        R = self._rig_mod()
+        rigs = R.load_rigs(self._rigs_path())
+        tnow = time.monotonic()
+        out = []
+        for name, rig in rigs.items():
+            ctrl = rig.get("controller") or {}
+            tgt = rig.get("target") or {}
+            p = ctrl.get("power") or {}
+            entry = {"name": name, "power": {"method": p.get("method"),
+                                             "channel": p.get("channel")}}
+            if str(p.get("method", "")).startswith("h503"):
+                proto, msg = R.h503_detect(ctrl.get("cmd_port"))
+                entry["controller"] = {"ok": bool(proto), "detail": f"{proto or '×'} {msg}"}
+            else:
+                tab = self._tab_by_console(R, ctrl.get("console"))
+                entry["controller"] = {
+                    "ok": bool(tab), "detail": f"实例{tab['agent_port']} @{tab['baud']}" if tab else "无实例",
+                    "tab": tab["agent_port"] if tab else None}
+            thit = self._tab_by_console(R, tgt.get("console"))
+            cached = self._usb_cache.get(name)
+            if cached and tnow - cached[0] < 10:
+                mode = cached[1]
+            else:
+                try:
+                    mode = R.usb_mode_for(rig)
+                except Exception:
+                    mode = None
+                self._usb_cache[name] = (tnow, mode)
+            entry["target"] = {"name": tgt.get("name"), "ok": bool(thit),
+                               "detail": f"实例{thit['agent_port']}" if thit else "无实例",
+                               "tab": thit["agent_port"] if thit else None,
+                               "usb": mode, "enter_loader_cmd": tgt.get("enter_loader_cmd")}
+            entry["last"] = self._rig_out.get(name)
+            out.append(entry)
+        return out
+
+    def rigs_action(self, name, action):
+        """网页电源动作: 后台线程执行 rigctl 动作, 输出存 _rig_out 供状态条回显。"""
+        R = self._rig_mod()
+        rigs = R.load_rigs(self._rigs_path())
+        if name not in rigs:
+            raise AgentApiError(404, f"无组合 {name!r}(现有: {', '.join(rigs)})")
+        if action not in ("on", "off", "coldboot", "enter-loader"):
+            raise AgentApiError(400, f"未知动作 {action!r}")
+
+        def worker():
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf), self._rig_lock:
+                    rig = rigs[name]
+                    p = (rig.get("controller") or {}).get("power") or {}
+                    if action == "on":
+                        R.act_power(name, rig, p.get("on_value", 1), "开机[网页]")
+                    elif action == "off":
+                        R.act_power(name, rig, p.get("off_value", 0), "关机[网页]")
+                    elif action == "coldboot":
+                        R.act_power(name, rig, p.get("off_value", 0), "关机[网页]")
+                        time.sleep(int(p.get("discharge_s", 20)))
+                        R.act_power(name, rig, p.get("on_value", 1), "开机[网页]")
+                    elif action == "enter-loader":
+                        R.act_enter_loader(name, rig)
+            except SystemExit as e:      # RigError 走这条
+                buf.write(f"[失败] {e}")
+            except Exception as e:
+                buf.write(f"[异常] {e}")
+            self._rig_out[name] = time.strftime("%H:%M:%S ") + buf.getvalue().strip()
+
+        threading.Thread(target=worker, daemon=True).start()
+        return {"started": True, "rig": name, "action": action}
+
     def audit_tail(self, n=30):
         """取审计账最后 n 条(供浏览器 AI 活动条); 任何失败返回空表不阻塞页面。"""
         try:
@@ -477,6 +581,12 @@ class _Handler(BaseHTTPRequestHandler):
             return 200, False, hub.status()      # 网关无自有账本, info 即聚合状态
         if seg[1] == "tabs":
             return self._route_tabs(hub, method, seg, query)
+        if seg[1] == "rigs" and len(seg) == 2:
+            self._need(method, "GET")
+            return 200, False, {"rigs": hub.rigs_status()}
+        if seg[1] == "rigs" and len(seg) == 4:
+            self._need(method, "POST")
+            return 200, False, hub.rigs_action(seg[2], seg[3])
         if seg[1] == "audit" and len(seg) == 2:
             self._need(method, "GET")
             n = int(parse_qs(query).get("n", ["30"])[0])   # query 是原始串(proxy 要原样转发)
@@ -541,6 +651,18 @@ UI_HTML = r"""<!DOCTYPE html>
  .tab.on{background:#2f6fed;border-color:#2f6fed;color:#fff}
  #st{margin-left:auto;color:#7f8c9b;font-size:12px;max-width:42%;text-align:right}
  #term{flex:1;min-height:0;padding:4px 8px}
+ #rigs{display:flex;flex-direction:column;gap:4px;padding:6px 10px;
+   background:#12161c;border-bottom:1px solid #232b34;font-size:12px}
+ .rig{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+ .chip{border-radius:5px;padding:1px 7px;background:#1d242c;border:1px solid #3b4757}
+ .chip.ok{color:#7ee787;border-color:#2ea043}
+ .chip.bad{color:#ff7b72;border-color:#c93c37}
+ .chip.warn{color:#d29922}
+ .chip.jump{cursor:pointer}
+ .rbtn{background:#232b34;border:1px solid #3b4757;color:#cdd6e0;border-radius:5px;
+   padding:1px 9px;cursor:pointer;font:12px Consolas,monospace}
+ .rbtn:hover{background:#2f6fed;color:#fff}
+ .last{color:#7f8c9b;font-size:11px;width:100%}
  #ai{position:fixed;right:10px;bottom:10px;width:430px;max-width:45vw;max-height:170px;
    overflow:auto;background:rgba(21,26,32,.94);border:1px solid #3b4757;border-radius:8px;
    padding:6px 10px;font:11px/1.6 Consolas,monospace;color:#8fd18f;white-space:pre-wrap;
@@ -548,6 +670,7 @@ UI_HTML = r"""<!DOCTYPE html>
 </style></head><body>
 <div id="bar"><span style="color:#7f8c9b;font-size:12px">板子:</span>
  <span id="tabs" style="display:contents"></span><span id="st"></span></div>
+<div id="rigs">rig 状态条加载中…</div>
 <div id="term"></div>
 <div id="ai">AI 活动条</div>
 <script src="/static/xterm.js"></script>
@@ -676,7 +799,42 @@ function tl(cmd){cmd=cmd||"";
  if(all.length>4)res+=" → …(共"+all.length+"段)";
  return res}
 
-function devOf(t){const m=(t||'').match(/usb-([\d.:]+)/);
+async function pollRigs(){try{const d=await jget('/api/rigs');
+ const box=$('rigs');box.textContent='';
+ for(const r of d.rigs){
+  const row=document.createElement('div');row.className='rig';
+  const nm=document.createElement('b');nm.textContent=r.name;row.appendChild(nm);
+  const mk=(label,o,jumpable)=>{const s=document.createElement('span');
+   s.className='chip '+(o&&o.ok?'ok':'bad');
+   s.textContent=label+': '+(o?(o.ok?'✔ '+o.detail:'✘ '+(o.detail||'')):'—');
+   if(jumpable&&o&&o.tab!==null&&o.tab!==undefined){s.classList.add('jump');
+    s.title='点击切到该串口';s.onclick=()=>sel(o.tab)}
+   row.appendChild(s)};
+  mk('控制器',r.controller);mk('受控['+(r.target.name||'?')+']',r.target,true);
+  const u=document.createElement('span');
+  u.className='chip '+(r.target.usb?'ok':'warn');
+  u.textContent='USB: '+(r.target.usb||'未见');row.appendChild(u);
+  const pw=document.createElement('span');pw.className='chip warn';
+  pw.textContent='电源:'+(r.power.method||'?')+(r.power.channel?('→'+r.power.channel):'(未绑定)');
+  row.appendChild(pw);
+  const acts=document.createElement('span');
+  const actDefs=[['on','开机',null],['off','关机',r.name+': 真断电, 确认?'],
+   ['coldboot','冷启动',r.name+': 冷启动=真断电→放电→上电, 确认?']];
+  if(r.target.enter_loader_cmd)
+   actDefs.push(['enter-loader','进Loader',r.name+': 下发 '+r.target.enter_loader_cmd+' 进 Loader 模式?']);
+  for(const[a,lbl,cfm]of actDefs){
+   const b=document.createElement('button');b.textContent=lbl;b.className='rbtn';
+   b.onclick=async()=>{if(cfm&&!confirm(cfm))return;
+    try{await jpost(`/api/rigs/${r.name}/${a}`,{});
+     note(r.name+' '+lbl+' 已下发(结果见状态条末行)')}
+    catch(e){note('失败: '+e.message)}};
+   acts.appendChild(b)}
+  row.appendChild(acts);
+  if(r.last){const l=document.createElement('span');l.className='last';l.textContent='↳ '+r.last;
+   row.appendChild(l)}
+  box.appendChild(row)}}catch(e){$('rigs').textContent='rig 状态获取失败: '+e.message}}
+
+function devOf(t)function devOf(t){const m=(t||'').match(/usb-([\d.:]+)/);
  if(m){const g=m[1].split(':');return g.length>1?g[1]:g[0]}
  const b=(t||'').split('/').pop();return /^tty/.test(b)?b:null}
 async function pollAI(){try{const d=await jget('/api/audit?n=30');
@@ -699,8 +857,8 @@ async function pollAI(){try{const d=await jget('/api/audit?n=30');
    +(g?'  ┋ '+g.slice(0,60):'')).split('\n').slice(-8).join('\n')}}
  catch(e){}}
 $('ai').ondblclick=()=>$('ai').style.display=$('ai').style.display==='none'?'block':'none';
-setInterval(pollTabs,3000);setInterval(pollAI,2500);
-streamLoop();pollTabs();pollAI();
+setInterval(pollTabs,3000);setInterval(pollAI,2500);setInterval(pollRigs,5000);
+streamLoop();pollTabs();pollAI();pollRigs();
 </script></body></html>"""
 
 
