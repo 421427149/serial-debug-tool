@@ -173,43 +173,70 @@ def power_cmdline(rig, value):
 
 # ---------------------------------------------------------------- 动作
 
-# ------------------------------------------------ H503 A5 协议(4字节帧+回帧)
+# ------------------------- H503 双协议(A5 二进制=现固件 / JSON V3.5=新固件)
 
+# A5: 4字节帧 A5+通道+状态+校验(前三和&0xFF), 回帧 A5+通道+错误码+校验; 探活=截断3字节帧。
+# JSON V3.5(协议源=tqtools/QSerial 仓 power_board_protocol.py): 行式JSON,
+#   {"ch":名,"st":0/1} 控制, {"qr":名} 查询, 回带 code(0成功); 通道名大小写敏感。
+A5_CH_BY_NAME = {"USB": 0x01, "5V2": 0x02, "5V3": 0x03, "12V4": 0x04, "12V5": 0x05}
+JSON_V35_CHANNELS = ("USB0", "USB1", "5V2", "5V3", "12V4", "12V5", "RST_USB",
+                     "PB3", "PB4", "PB5", "PB6", "PB7", "PB8", "PB12", "PB13",
+                     "PA8", "PA9", "PA10", "PA15")
 H503_ACK = {0: "成功", 1: "长度错", 2: "校验错", 3: "状态错"}
 
 
-def h503_frame(channel, state):
-    body = bytes([0xA5, channel, state])
-    return body + bytes([sum(body) & 0xFF])          # 校验 = 前三字节之和 & 0xFF
-
-
 def _h503_xact(cmd_port, frame, timeout=1.5):
-    """打开命令口发一帧读回帧( exclusive 独占, 用完即关)。CDC 无波特率意义。"""
+    """独占打开命令口发一帧读回帧(CDC 无波特率意义), 用完即关。"""
     import serial
     with serial.Serial(cmd_port, timeout=timeout) as s:
         s.reset_input_buffer()
         s.write(frame)
-        return s.read(4)
+        return s.read(64)
 
 
-def h503_probe(cmd_port):
-    """无副作用探活: 故意发截断 3 字节帧 A5 01 00, 应答回 a5 01 01 a7(长度错)。"""
+def h503_detect(cmd_port):
+    """双协议探测: 先 JSON(新固件会回 JSON 行), 再 A5(截断帧应答 a50101a7)。"""
+    try:
+        reply = _h503_xact(cmd_port, b'{"qr":"USB0"}\n')
+        line = reply.split(b"\n")[0].strip()
+        if line.startswith(b"{"):
+            return "json-v3.5", line.decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None, "命令口打不开"
     try:
         reply = _h503_xact(cmd_port, bytes([0xA5, 0x01, 0x00]))
     except (OSError, ValueError) as e:
-        return False, f"打不开命令口: {e}"
-    return reply.hex() == "a50101a7", reply.hex()
+        return None, f"命令口读写失败: {e}"
+    if reply[:3].hex() == "a50101":
+        return "a5-bin", f"探活应答 {reply.hex()}"
+    return None, f"未知应答 {reply.hex()!r}"
 
 
-def h503_power(cmd_port, channel, state):
-    """单通道 ON/OFF(完整 4 字节帧——探活帧≠控制帧, 别抄 3 字节格式)。"""
+def h503_power(cmd_port, channel, state, protocol="a5-bin"):
+    """按协议发电源命令。channel 用通道名(5V2/12V4/USB...), A5 内部译为 0x0X。"""
     if channel is None:
         raise RigError(2, "电源通道未绑定: 先跑 bind 差分或人工确认后填 rigs.json")
-    try:
-        reply = _h503_xact(cmd_port, h503_frame(channel, state))
-    except (OSError, ValueError) as e:
-        raise RigError(4, f"命令口读写失败: {e}")
-    if len(reply) < 4 or reply[0] != 0xA5 or reply[1] != channel:
+    if protocol == "json-v3.5":
+        import json as _json
+        cmd = _json.dumps({"ch": channel, "st": int(state)}, separators=(",", ":"))
+        reply = _h503_xact(cmd_port, cmd.encode() + b"\n")
+        try:
+            resp = _json.loads(reply.split(b"\n")[0].strip().decode("utf-8", "replace"))
+        except ValueError:
+            raise RigError(4, f"回帧非 JSON: {reply[:64]!r}")
+        code = resp.get("code")
+        if code != 0:
+            raise RigError(4, f"设备回 code={code}: {resp}")
+        return f"JSON 回帧 {resp}"
+    ch = A5_CH_BY_NAME.get(channel)
+    if ch is None:
+        try:
+            ch = int(str(channel), 16) if isinstance(channel, str) else int(channel)
+        except ValueError:
+            raise RigError(2, f"未知通道名 {channel!r}(A5 协议可用: {list(A5_CH_BY_NAME)})")
+    body = bytes([0xA5, ch, int(state) & 1])
+    reply = _h503_xact(cmd_port, body + bytes([sum(body) & 0xFF]))
+    if len(reply) < 4 or reply[0] != 0xA5 or reply[1] != ch:
         raise RigError(4, f"回帧异常: {reply.hex()!r}")
     if reply[2] != 0:
         raise RigError(4, f"回帧错误码 {reply[2]}({H503_ACK.get(reply[2], '?')})")
@@ -218,13 +245,16 @@ def h503_power(cmd_port, channel, state):
 
 def act_power(rig_name, rig, value, label):
     ctrl = rig.get("controller") or {}
-    if ctrl.get("power", {}).get("method") == "h503-a5":
-        # 上电顺序纪律: H503 的 USB2/USB3 口供电受通道 0x01 控制, 先开它再开目标板通道
+    if str(ctrl.get("power", {}).get("method", "")).startswith("h503"):
+        proto, _ = h503_detect(ctrl["cmd_port"])
+        if not proto:
+            raise RigError(3, "H503 命令口双协议探测均失败")
+        # 上电顺序纪律: H503 的 USB 口供电先开再开目标板通道
         usb_ch = ctrl.get("usb_port_channel")
         if value == ctrl["power"].get("on_value", 1) and usb_ch is not None:
-            h503_power(ctrl["cmd_port"], usb_ch, ctrl["power"].get("on_value", 1))
-        msg = h503_power(ctrl["cmd_port"], ctrl["power"].get("channel"), value)
-        print(f"{rig_name}: {label} 完成(通道 0x{(ctrl['power'].get('channel') or 0):02X}, {msg})")
+            h503_power(ctrl["cmd_port"], usb_ch, ctrl["power"].get("on_value", 1), proto)
+        msg = h503_power(ctrl["cmd_port"], ctrl["power"].get("channel"), value, proto)
+        print(f"{rig_name}: {label} 完成({proto}, 通道 {ctrl['power'].get('channel')}, {msg})")
         return
     hit = find_instance(console_chain_of_rig(rig, "controller"))
     if not hit:
@@ -354,21 +384,21 @@ def act_bind_h503(rig_name, rig, rigs_path, all_rigs, confirmed=False):
     if not confirmed:
         raise RigError(2, f"差分会逐路断电且结束后保持全 OFF(原状态不可恢复); "
                           f"确认接好线后跑: rigctl.py {rig_name} bind --yes")
-    ok, msg = h503_probe(ctrl["cmd_port"])
-    if not ok:
-        raise RigError(3, f"H503 探活失败: {msg}")
+    proto, _ = h503_detect(ctrl["cmd_port"])
+    if not proto:
+        raise RigError(3, "H503 命令口双协议探测均失败")
     binding = None
-    for ch in range(0x02, 0x06):        # 0x02..0x05; 0x01 是 USB 口供电不参与绑定
+    for name in ("USB", "5V2", "5V3", "12V4", "12V5"):   # USB=板载USB2/USB3口供电
         a = _diff_snapshot()
-        h503_power(ctrl["cmd_port"], ch, 0)
+        h503_power(ctrl["cmd_port"], name, 0, proto)
         time.sleep(5)
         b = _diff_snapshot()
         gone = [k for k, v in a.items() if k not in b and not isinstance(v, int)]
         gone_tty = [k for k in a if k not in b and k.startswith("tty:")]
-        print(f"通道 0x{ch:02X} 断电后消失: {gone + gone_tty or '(无变化→空通道)'}")
+        print(f"通道 {name} 断电后消失: {gone + gone_tty or '(无变化→空通道)'}")
         if gone or gone_tty:
-            binding = ch
-            print(f"{rig_name}: 绑定命中 → 通道 0x{ch:02X} (记录进 rigs.json)")
+            binding = name
+            print(f"{rig_name}: 绑定命中 → 通道 {name} (记录进 rigs.json)")
             for k in gone:
                 if k.startswith("adb:"):
                     rig["target"]["adb_serial"] = k[4:]
@@ -378,7 +408,7 @@ def act_bind_h503(rig_name, rig, rigs_path, all_rigs, confirmed=False):
                 if tab:
                     rig["target"]["console"] = hub_chain(tab["port"]) or tab["port"]
                     rig["target"]["baud"] = tab["baud"]
-            rig["target"]["name"] = f"通道0x{ch:02X}目标板"
+            rig["target"]["name"] = f"通道{name}目标板"
             rig["target"]["bound_at"] = time.strftime("%Y-%m-%d %H:%M")
             rig["target"]["bound_by"] = "rigctl bind 差分"
             break
@@ -413,12 +443,12 @@ def usb_alive(target):
 def act_status(rig_name, rig):
     parts = []
     ctrl = rig.get("controller") or {}
-    if ctrl.get("power", {}).get("method") == "h503-a5":
-        ok, msg = h503_probe(ctrl["cmd_port"])
+    if str(ctrl.get("power", {}).get("method", "")).startswith("h503"):
+        proto, msg = h503_detect(ctrl["cmd_port"])
         ch = ctrl["power"].get("channel")
         parts.append(f"控制器{ctrl.get('name','H503')} "
-                     f"{'✔探活通过('+msg+')' if ok else '✘探活失败('+msg+')'}"
-                     + (f" 通道0x{ch:02X}" if ch is not None else " 通道未绑定"))
+                     f"{'✔'+proto+'('+msg+')' if proto else '✘双协议探测失败('+msg+')'}"
+                     + (f" 通道{ch}" if ch is not None else " 通道未绑定"))
         thit = find_instance(console_chain_of_rig(rig, "target"))
         tgt = rig.get("target") or {}
         if thit:
@@ -562,7 +592,7 @@ def main():
         act_power(name, rig, p["on_value"], "开机")
         print(f"{name}: 冷启动已触发, 盯受控串口看 boot 洪流")
     elif action == "bind":
-        if (rig.get("controller") or {}).get("power", {}).get("method") == "h503-a5":
+        if str((rig.get("controller") or {}).get("power", {}).get("method", "")).startswith("h503"):
             act_bind_h503(name, rig, rigs_path, rigs, confirmed="--yes" in args)
         else:
             act_bind(name, rig, rigs_path, rigs)

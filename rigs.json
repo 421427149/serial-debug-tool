@@ -48,12 +48,12 @@
       "cmd_port": "/dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_005F003B3032510235343637-if00",
       "usb_port_channel": 1,
       "power": {
-        "method": "h503-a5",
+        "method": "h503",
         "channel": null,
         "on_value": 1,
         "off_value": 0,
         "discharge_s": 25,
-        "note": "A5协议4字节帧+回帧校验; 通道0x01=USB2/USB3口供电(先开), 0x02=5V2, 0x03=5V3, 0x04=12V4, 0x05=12V5; 0x00多通道是整体赋值勿用; 裸ON无边沿不生效(OFF→放电≥25s→ON); 通道↔板绑定未探明, 须断电差分法或人工确认后填 channel"
+        "note": "双协议: 现固件=A5二进制4字节帧(回帧校验, 探活=a50101a7); 新固件=JSON V3.5行协议(协议源=tqtools/QSerial仓 power_board_protocol.py, 19路通道名, {\"qr\"}可查询); rigctl 自动探测. 通道名: USB=板载USB2/3口供电(先开), 5V2, 5V3, 12V4, 12V5; 三条坑: 裸ON无边沿不生效(OFF→放电≥25s→ON); 无查询命令(A5代), bind差分后各路保持OFF; V3.5固件有{qr}查询+RST_USB通道, 升级后bind可无损"
       }
     },
     "target": {
