@@ -262,7 +262,9 @@ class AgentChannel:
         if has_text:
             if not isinstance(body["text"], str) or not body["text"]:
                 raise AgentApiError(400, "text 必须是非空字符串")
-            data = body["text"].encode(t.enc, errors="replace") + NEWLINES[t.nl]
+            data = body["text"].encode(t.enc, errors="replace")
+            if body.get("nl", True):   # 浏览器键击直通模式按字符发送, 不自动加行尾
+                data += NEWLINES[t.nl]
         else:
             hx = "".join(body["hex"].split()).lower() if isinstance(body["hex"], str) else ""
             if not hx or len(hx) % 2 or not all(c in "0123456789abcdef" for c in hx):
@@ -289,9 +291,10 @@ class AgentChannel:
         with self._lock:
             cur, nxt, evicted = self._cursor, self._next_seq, self._evicted
         return {
-            "name": "serial_debug", "version": "1.1+agent",
+            "name": "serial_debug", "version": "1.2+agent",
             "host": self.host, "port": self.bound_port, "token_required": bool(self.token),
             "uptime_s": round(time.time() - self.started_at, 3),
+            "raw_send": True,
             "port": t.port, "baud": t.baud, "open": t.ser is not None,
             "bits": t.bits, "parity": t.parity, "stopbits": t.stopbits, "flow": t.flow,
             "encoding": t.enc, "newline": t.nl, "raw_mode": t.raw,
@@ -381,7 +384,7 @@ class _Handler(BaseHTTPRequestHandler):
         if r == "status" and len(seg) == 2:
             self._need(method, "GET")
             t = ch.tool
-            return {"name": "serial_debug", "version": "1.1+agent",
+            return {"name": "serial_debug", "version": "1.2+agent",
                     "token_required": bool(ch.token), "open": t.ser is not None,
                     "port": t.port, "tab_count": 1}
         if r == "ports" and len(seg) == 2:

@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "1.5"
+HUB_VERSION = "1.6"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -316,16 +316,17 @@ class Hub:
             return parts["dtb"][:-4]
         return None
 
-    def proxy(self, index, action, method, query, body, token):
+    def proxy(self, index, action, method, query, body, token, src="agent"):
         """/api/tabs/{i}/{action} -> 实例 /api/tabs/0/{action}, 字节级透传。
 
         返回 (状态码, 响应体字节): 实例回的已是完整 {"ok":..} 包络(含业务错误),
         原样上送, 网关不重打包——大块 receive 不多吃一遍 JSON 序列化。
         """
-        if action not in ("open", "close", "send", "receive"):
+        if action not in ("open", "close", "send", "receive", "info"):
             raise AgentApiError(404, f"未知操作: {action}")
         inst = self.instance_at(index)
-        path = f"/api/tabs/0/{action}"
+        # 实例侧 info 挂根路径(/api/info), 其余动作带 tab 段
+        path = "/api/info" if action == "info" else f"/api/tabs/0/{action}"
         if query:
             path += "?" + query
         try:
@@ -335,7 +336,7 @@ class Hub:
         if not payload:   # 异常对端回空体, 补一个合法错误包络
             payload = json.dumps({"ok": False, "error": f"实例 {inst.agent_port} 返回空响应"},
                                  ensure_ascii=False).encode("utf-8")
-        self._audit(inst, action, body, payload, status)
+        self._audit(inst, action, body, payload, status, src)
         return status, payload
 
     def audit_tail(self, n=30):
@@ -353,7 +354,7 @@ class Hub:
                 continue
         return out
 
-    def _audit(self, inst, action, body, payload, status):
+    def _audit(self, inst, action, body, payload, status, src="agent"):
         """AI 串口活动审计: 每次经网关的 send/receive/open/close 落一行 JSONL。
 
         这是"人围观 AI"的强制卡口——只要 AI 走 hub(唯一推荐路径), 它读到的串口
@@ -366,7 +367,8 @@ class Hub:
             dev = inst.status.get("port") or "?"
             rec = {"t": time.strftime("%H:%M:%S"),
                    "board": (self._board_of(dev) or {}).get("name") or os.path.basename(dev),
-                   "dev": self._jack_of(dev), "action": action, "status": status}
+                   "dev": self._jack_of(dev), "action": action, "status": status,
+                   "src": src}
             if action == "send" and body:
                 req = json.loads(body)
                 rec["out"] = (req.get("text") or req.get("hex") or "")[:SEND_PREVIEW]
@@ -427,6 +429,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_bytes(200, UI_HTML.encode("utf-8"),
                                  ctype="text/html; charset=utf-8")
                 return
+            if method == "GET" and parts.path.startswith("/static/"):
+                name = parts.path[len("/static/"):]
+                if name not in ("xterm.js", "xterm.css", "fit.js"):
+                    raise AgentApiError(404, "未知静态文件")
+                fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "webui", name)
+                ctype = "text/css" if name.endswith(".css") else "application/javascript"
+                with open(fp, "rb") as f:
+                    self._send_bytes(200, f.read(), ctype=f"{ctype}; charset=utf-8")
+                return
             seg = [s for s in parts.path.split("/") if s]
             status, raw, payload = self._route(hub, method, seg, parts.query)
             if raw:   # 实例回的完整包络, 字节级透传
@@ -471,7 +483,8 @@ class _Handler(BaseHTTPRequestHandler):
             raise AgentApiError(404, "路径应为 /api/tabs/{index}/{action}")
         body = self._read_body() if method == "POST" else None
         token = self.headers.get("X-Agent-Token", "")
-        status, payload = hub.proxy(int(seg[2]), seg[3], method, query, body, token)
+        src = self.headers.get("X-Hub-Src", "agent")
+        status, payload = hub.proxy(int(seg[2]), seg[3], method, query, body, token, src)
         return status, True, payload
 
     @staticmethod
@@ -505,97 +518,106 @@ UI_HTML = r"""<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
 <title>串口终端 · serial_hub</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/xterm.css">
 <style>
  html,body{height:100%;margin:0}
- body{font:14px/1.5 Consolas,monospace;background:#0b0e12;color:#cdd6e0;
+ body{font:13px Consolas,monospace;background:#0b0e12;color:#cdd6e0;
    display:flex;flex-direction:column}
  #bar{display:flex;gap:6px;padding:7px 10px;background:#151a20;flex-wrap:wrap;align-items:center}
  .tab{border:1px solid #3b4757;background:#1d242c;color:#cdd6e0;border-radius:6px;
-   padding:4px 12px;cursor:pointer;font:inherit}
+   padding:4px 12px;cursor:pointer;font:13px Consolas,monospace}
  .tab.on{background:#2f6fed;border-color:#2f6fed;color:#fff}
  #st{margin-left:auto;color:#7f8c9b;font-size:12px;max-width:42%;text-align:right}
- #con{flex:1;overflow-y:auto;overflow-x:hidden;padding:8px 10px 2px;white-space:pre-wrap;
-   word-break:break-all;font:13px/1.5 Consolas,monospace;cursor:text}
- #con .ai{color:#f0a500}
- #prompt{display:flex;align-items:center;padding:2px 10px 10px;background:#0b0e12;gap:6px}
- #prompt .ps{color:#5fd75f;font-weight:bold}
- #inp{flex:1;background:transparent;border:0;outline:0;color:#e6edf3;
-   font:13px/1.5 Consolas,monospace;caret-color:#5fd75f}
- #ai{position:fixed;right:10px;bottom:12px;width:430px;max-width:45vw;max-height:170px;overflow:auto;
-   background:rgba(21,26,32,.94);border:1px solid #3b4757;border-radius:8px;padding:6px 10px;
-   font:11px/1.6 Consolas,monospace;color:#8fd18f;white-space:pre-wrap;pointer-events:none}
+ #term{flex:1;min-height:0;padding:4px 8px}
+ #ai{position:fixed;right:10px;bottom:10px;width:430px;max-width:45vw;max-height:170px;
+   overflow:auto;background:rgba(21,26,32,.94);border:1px solid #3b4757;border-radius:8px;
+   padding:6px 10px;font:11px/1.6 Consolas,monospace;color:#8fd18f;white-space:pre-wrap;
+   pointer-events:none;z-index:5}
 </style></head><body>
-<div id="bar"><span style="color:#7f8c9b;font-size:12px">板子:</span><span id="tabs"
-  style="display:contents"></span><span id="st"></span></div>
-<div id="con"></div>
-<div id="prompt"><span class="ps">❯</span>
- <input id="inp" autocomplete="off" spellcheck="false"
-   placeholder="直接敲命令, 回车发往当前板子; ↑↓ 翻发送历史"></div>
+<div id="bar"><span style="color:#7f8c9b;font-size:12px">板子:</span>
+ <span id="tabs" style="display:contents"></span><span id="st"></span></div>
+<div id="term"></div>
 <div id="ai">AI 活动条</div>
+<script src="/static/xterm.js"></script>
+<script src="/static/fit.js"></script>
 <script>
 const $=id=>document.getElementById(id);
-let tabs=[],active=null;const state={};        // state[i]={off,segs:[{c:'s'|'a',t}]}
-let hist=[],hi=0,own=[];                       // own=本页面刚发的命令(注入时跳过防重)
-const ANSI=/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-_]/g;
-const esc=s=>(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");
-const clean=s=>(s||"").replace(ANSI,"").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,"");
-async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error("HTTP "+r.status);
- const j=await r.json();if(!j.ok)throw new Error(j.error||"错误");return j.data}
-async function jpost(u,b){const r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},
- body:JSON.stringify(b)});const j=await r.json();if(!j.ok)throw new Error(j.error||"错误");return j.data}
-function note(s){$("st").textContent=s}
-async function pollTabs(){try{const d=await jget("/api/tabs");tabs=d.tabs;renderTabs();
-  if(active===null&&tabs.length)sel(tabs[0].index);
-  note(tabs.length?("在线 "+tabs.length+" 板"):"无实例在线")}catch(e){note("hub 不可达: "+e.message)}}
-function renderTabs(){const bar=$("tabs");bar.textContent="";
- for(const t of tabs){const b=document.createElement("button");
-  b.className="tab"+(t.index===active?" on":"");
-  b.textContent=(t.open?"● ":"○ ")+t.title;b.onclick=()=>sel(t.index);bar.appendChild(b)}}
-async function sel(i){active=i;if(!state[i])state[i]={off:null,segs:[]};renderTabs();draw();
- if(state[i].off===null){try{const d=await jget(`/api/tabs/${i}/receive?tail=1&max_bytes=3000`);
-  if(d.text)state[i].segs.push({c:"s",t:d.text});state[i].off=d.next_offset;draw()}
-  catch(e){state[i].segs.push({c:"a",t:"读取失败: "+e.message});draw()}}}
+const term=new Terminal({cursorBlink:true,fontFamily:'Consolas,"Courier New",monospace',
+ fontSize:14,scrollback:5000,
+ theme:{background:'#0b0e12',foreground:'#cdd6e0',cursor:'#5fd75f',
+        selectionBackground:'#2f6fed55'}});
+const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open($('term'));fit.fit();
+addEventListener('resize',()=>fit.fit());
+let tabs=[],active=null,raw=false,line='',hist=[],hi=0;const state={};
+async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error('HTTP '+r.status);
+ const j=await r.json();if(!j.ok)throw new Error(j.error||'错误');return j.data}
+async function jpost(u,b,src){const r=await fetch(u,{method:'POST',
+ headers:{'Content-Type':'application/json','X-Hub-Src':src||'web'},
+ body:JSON.stringify(b)});const j=await r.json();
+ if(!j.ok)throw new Error(j.error||'错误');return j.data}
+function note(s){$('st').textContent=s}
+async function pollTabs(){try{const d=await jget('/api/tabs');tabs=d.tabs;renderTabs();
+ if(active===null&&tabs.length)sel(tabs[0].index);
+ note(tabs.length?('在线 '+tabs.length+' 板'):'无实例在线')}catch(e){note('hub 不可达: '+e.message)}}
+function renderTabs(){const bar=$('tabs');bar.textContent='';
+ for(const t of tabs){const b=document.createElement('button');
+  b.className='tab'+(t.index===active?' on':'');
+  b.textContent=(t.open?'● ':'○ ')+t.title;b.onclick=()=>sel(t.index);bar.appendChild(b)}}
+async function sel(i){active=i;const s=state[i]||(state[i]={off:null,buf:'',raw:false,hist:[],hi:0});
+ raw=s.raw;line='';renderTabs();
+ term.reset();
+ if(s.buf)term.write(s.buf);
+ try{const info=await jget(`/api/tabs/${i}/info`);s.raw=!!info.raw_send}catch(e){s.raw=false}
+ raw=s.raw;note((s.raw?'键击直通':'行模式(旧实例)')+' · '+note2());
+ if(s.off===null){try{const d=await jget(`/api/tabs/${i}/receive?tail=1&max_bytes=4000`);
+   if(d.text){s.buf+=d.text;term.write(d.text)}s.off=d.next_offset}
+  catch(e){term.write('\r\n\x1b[31m(读取失败: '+e.message+')\x1b[0m')}}
+ term.focus()}
+function note2(){const t=tabs.find(x=>x.index===active);
+ return t?(t.title+(t.open?'':' (串口未开)')):''}
 async function pollStream(){if(active===null||document.hidden)return;const s=state[active];
  if(!s||s.off===null)return;
  try{const d=await jget(`/api/tabs/${active}/receive?offset=${s.off}&max_bytes=16384`);
-  if(d.bytes>0){push({c:"s",t:d.text});}s.off=d.next_offset}catch(e){}}
-function push(seg){const s=state[active];if(!s)return;s.segs.push(seg);
- let n=0;for(const x of s.segs)n+=x.t.length;
- while(n>400000&&s.segs.length>2){n-=s.segs[0].t.length;s.segs.shift()}
- draw()}
-function trim(s){let a=s.split("\n");if(a.length>800)a=a.slice(-800);return a.join("\n")}
-function draw(){const pre=$("con");const s=state[active];
- const near=pre.scrollHeight-pre.scrollTop-pre.clientHeight<90;
- pre.innerHTML=s?s.segs.map(x=>x.c==="a"
-   ?`<span class="ai">⟦AI➤ ${esc(x.t)}⟧</span>`:esc(x.t)).join(""):"(选一块板子)";
- if(near)pre.scrollTop=pre.scrollHeight}
-function devOf(t){const m=(t||"").match(/usb-([\d.:]+)/);
- if(m){const g=m[1].split(":");return g.length>1?g[1]:g[0]}
- const b=(t||"").split("/").pop();return /^tty/.test(b)?b:null}
-async function pollAI(){try{const d=await jget("/api/audit?n=30");
- const recs=d.records||[];const cur=active;
- for(const r of recs){if(r.action!=="send")continue;
-  const key=r.t+"|"+(r.out||"");if(pollAI.seen===undefined)pollAI.seen=[];
-  if(pollAI.seen.includes(key))continue;pollAI.seen.push(key);
-  if(pollAI.seen.length>400)pollAI.seen=pollAI.seen.slice(-200);
-  if(cur===null||devOf(tabs.find(x=>x.index===cur)?.port)!==r.dev)continue;
-  const out=r.out||"";
-  if(own.some(o=>o.t===out&&Date.now()-o.at<8000)){continue}   // 本页面自己发的, 流里已有回显
-  const s=state[cur];if(!s)continue;
-  const fmt=out.replace(/; /g,";\n    ");                     // 长组合命令按 ; 折行解析
-  push({c:"a",t:trim(fmt)});}}
+  if(d.bytes>0){term.write(d.text);s.buf+=d.text;
+   if(s.buf.length>200000)s.buf=s.buf.slice(-150000)}
+  s.off=d.next_offset}catch(e){}}
+let chain=Promise.resolve();      // 键击串行化保顺序
+function rawSend(data){chain=chain.then(()=>
+  jpost(`/api/tabs/${active}/send`,{text:data,nl:false}))
+ .catch(e=>note('发送失败: '+e.message))}
+function lineKey(d){const s=state[active];
+ for(const ch of d){
+  if(ch==='\r'){const v=line;line='';term.write('\r\n');
+   if(v){s.hist.push(v);s.hi=s.hist.length;
+    jpost(`/api/tabs/${active}/send`,{text:v})
+     .catch(e=>note('发送失败: '+e.message))}}
+  else if(ch==='\x7f'){if(line){line=line.slice(0,-1);term.write('\b \b')}}
+  else if(ch==='\x03'){line='';term.write('^C\r\n')}
+  else if(ch>=' '||ch==='\t'){line+=ch;term.write(ch)}}}
+term.onData(d=>{if(active===null)return;
+ if(raw){rawSend(d)}else{lineKey(d)}});
+function devOf(t){const m=(t||'').match(/usb-([\d.:]+)/);
+ if(m){const g=m[1].split(':');return g.length>1?g[1]:g[0]}
+ const b=(t||'').split('/').pop();return /^tty/.test(b)?b:null}
+async function pollAI(){try{const d=await jget('/api/audit?n=30');
+ for(const r of (d.records||[])){
+  if(r.action!=='send'||r.src==='web')continue;      // 网页自己的不标, 只标 AI
+  if(pollAI.seen===undefined)pollAI.seen=[];
+  const key=r.t+'|'+(r.out||'');if(pollAI.seen.includes(key))continue;
+  pollAI.seen.push(key);if(pollAI.seen.length>400)pollAI.seen=pollAI.seen.slice(-200);
+  if(active===null)continue;const t=tabs.find(x=>x.index===active);
+  if(!t||devOf(t.port)!==r.dev)continue;
+  const s=state[active];if(!s)continue;
+  const fmt=(r.out||'').replace(/; /g,';\r\n    ');  // 长组合命令按 ; 折行解析
+  const chunk='\r\n\x1b[33m⟦AI➤ '+fmt+'⟧\x1b[0m\r\n';
+  term.write(chunk);s.buf+=chunk.replace(/\x1b\[[0-9;?]*[A-Za-z]/g,'');
+  if(s.buf.length>200000)s.buf=s.buf.slice(-150000);
+  $('ai').textContent=($('ai').textContent+'\n'+r.t+' ['+r.board+'] AI发 '+fmt)
+   .split('\n').slice(-8).join('\n')}}
  catch(e){}}
-async function send(){const inp=$("inp");const v=inp.value;if(!v||active===null)return;
- try{await jpost(`/api/tabs/${active}/send`,{text:v});
-  own.push({t:v,at:Date.now()});if(own.length>50)own=own.slice(-50);
-  hist.push(v);hi=hist.length;inp.value="";note("已发送 ➤ "+v)}catch(e){note("发送失败: "+e.message)}}
-$("send"===null?0:0);
-$("inp").onkeydown=e=>{if(e.key==="Enter"){send()}
- else if(e.key==="ArrowUp"){if(hi>0){hi--;$("inp").value=hist[hi]||""};e.preventDefault()}
- else if(e.key==="ArrowDown"){if(hi<hist.length){hi++;$("inp").value=hist[hi]||""};e.preventDefault()}};
-$("con").onclick=()=>$("inp").focus();
+$('ai').ondblclick=()=>$('ai').style.display=$('ai').style.display==='none'?'block':'none';
 setInterval(pollTabs,2000);setInterval(pollStream,700);setInterval(pollAI,1500);
-pollTabs();pollAI();$("inp").focus();
+pollTabs();pollAI();
 </script></body></html>"""
 
 
