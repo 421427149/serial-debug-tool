@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "1.7"
+HUB_VERSION = "1.8"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -607,7 +607,15 @@ function flushPend(){ptimer=null;const chunk=pend,tab=ptab;pend="";ptab=null;
   jpost(`/api/tabs/${tab}/send`,{text:chunk,nl:false}))
  .catch(e=>note('发送失败: '+e.message))}
 function lineKey(d){const s=state[active];
- for(const ch of d){
+ for(let i=0;i<d.length;i++){const ch=d[i];
+  if(ch==='\x1b'){   // ESC 序列整段吞掉(旧行模式不支持透传), 方向键映射本页历史
+   const m=/^\x1b(O\w|\[[0-9;]*[A-Za-z])/.exec(d.slice(i));
+   if(m){const f=m[0].slice(-1);
+    if(f==='A'&&s.hi>0){s.hi--;line=s.hist[s.hi]||'';term.write('\r\x1b[K'+line)}
+    else if(f==='B'){s.hi=Math.min(s.hi+1,s.hist.length);line=s.hist[s.hi]||'';
+      term.write('\r\x1b[K'+line)}
+    i+=m[0].length-1}
+   continue}
   if(ch==='\r'){const v=line;line='';term.write('\r\n');
    if(v){s.hist.push(v);s.hi=s.hist.length;
     jpost(`/api/tabs/${active}/send`,{text:v})
