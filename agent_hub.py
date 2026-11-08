@@ -47,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.2"
+HUB_VERSION = "2.3"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -138,6 +138,7 @@ class Hub:
         self._rig_out = {}                # 组合名 -> 最近一次网页动作输出
         self._rig_lock = threading.Lock() # 电源动作串行化
         self._usb_cache = {}              # 组合名 -> (monotonic, usb模式) 10s 缓存
+        self._h503_cache = {}             # 组合名 -> (monotonic, proto, msg) 30s 缓存
         self._boards_cache = (None, {})   # (mtime, 映射表), mtime 变了才重读(免重启)
         self._hint_cache = {}             # agent_port -> (capture_bytes, hint)
         self._pool = ThreadPoolExecutor(PROBE_WORKERS)
@@ -370,6 +371,26 @@ class Hub:
     def _rigs_path(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "rigs.json")
 
+    def _detect_safe(self, R, cmd_port, key):
+        """H503 探测包一层 3 秒超时(串口口僵死时 open 可能阻塞, 不能拖死状态条)。"""
+        cached = self._h503_cache.get(key)
+        if cached and time.monotonic() - cached[0] < 30:
+            return cached[1], cached[2]
+        result = {}
+
+        def run():
+            result["r"] = R.h503_detect(cmd_port)
+
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        th.join(3.0)
+        if th.is_alive():
+            r = (None, "探测超时(命令口僵死/被占)")
+        else:
+            r = result.get("r") or (None, "无应答")
+        self._h503_cache[key] = (time.monotonic(), r[0], r[1])
+        return r
+
     def _tab_by_console(self, R, key):
         if not key:
             return None
@@ -398,7 +419,7 @@ class Hub:
             entry = {"name": name, "power": {"method": p.get("method"),
                                              "channel": p.get("channel")}}
             if str(p.get("method", "")).startswith("h503"):
-                proto, msg = R.h503_detect(ctrl.get("cmd_port"))
+                proto, msg = self._detect_safe(R, ctrl.get("cmd_port"), name)
                 entry["controller"] = {"ok": bool(proto), "detail": f"{proto or '×'} {msg}"}
             else:
                 tab = self._tab_by_console(R, ctrl.get("console"))
@@ -672,7 +693,8 @@ UI_HTML = r"""<!DOCTYPE html>
    pointer-events:none;z-index:5}
 </style></head><body>
 <div id="bar"><span style="color:#7f8c9b;font-size:12px">板子:</span>
- <span id="tabs" style="display:contents"></span><span id="st"></span></div>
+ <span id="tabs" style="display:contents"></span><span id="st"></span>
+ <span style="color:#4a5568;font-size:11px;margin-left:8px">hub v2.3</span></div>
 <div id="rigs">rig 状态条加载中…</div>
 <div id="term"></div>
 <div id="ai">AI 活动条</div>
