@@ -36,6 +36,7 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -43,12 +44,15 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-HUB_VERSION = "1.2"
+HUB_VERSION = "1.3"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
 HINT_SCAN_BYTES = 64 * 1024           # 被动取证每次回看账本尾部的字节数
 HINT_TIMEOUT = 5.0                    # 取证请求超时秒数
+AUDIT_PREVIEW = 200                   # 审计里 send/receive 内容预览的最大字符数
+AUDIT_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "logs", "hub_audit.jsonl")
 # 板名映射文件按"上报的串口路径(或其 basename)"匹配, 值形如 {"name": "TQ3588", "note": "..."}
 BOARDS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "boards.json")
 # 被动取证签名(只读账本, 绝不发字节): 每类取出现最多的一条, 拼成 hint 给 AI 对照
@@ -108,7 +112,8 @@ class Hub:
     """发现与聚合逻辑; 协议路由在 _Handler, 状态只在本类。"""
 
     def __init__(self, host, listen_port, scan_min, scan_max,
-                 probe_timeout=1.0, forward_timeout=30.0, token="", boards_path=None):
+                 probe_timeout=1.0, forward_timeout=30.0, token="", boards_path=None,
+                 audit_path=AUDIT_DEFAULT):
         if scan_min <= listen_port <= scan_max:
             raise SystemExit(f"[ERROR] 监听端口 {listen_port} 落在扫描区间 "
                              f"[{scan_min},{scan_max}] 内, 会自己发现自己, 请换端口")
@@ -120,10 +125,14 @@ class Hub:
         self.forward_timeout = forward_timeout
         self.token = token or ""
         self.boards_path = boards_path
+        self.audit_path = audit_path
+        if audit_path:
+            os.makedirs(os.path.dirname(audit_path), exist_ok=True)
         self._boards_cache = (None, {})   # (mtime, 映射表), mtime 变了才重读(免重启)
         self._hint_cache = {}             # agent_port -> (capture_bytes, hint)
         self._pool = ThreadPoolExecutor(PROBE_WORKERS)
         self._log_lock = threading.Lock()
+        self._audit_lock = threading.Lock()
         self._last_seen = ()            # 上次打印过的实例端口集合, 变化时记一行
 
     # ------------------------------------------------------------ 发现
@@ -325,7 +334,38 @@ class Hub:
         if not payload:   # 异常对端回空体, 补一个合法错误包络
             payload = json.dumps({"ok": False, "error": f"实例 {inst.agent_port} 返回空响应"},
                                  ensure_ascii=False).encode("utf-8")
+        self._audit(inst, action, body, payload, status)
         return status, payload
+
+    def _audit(self, inst, action, body, payload, status):
+        """AI 串口活动审计: 每次经网关的 send/receive/open/close 落一行 JSONL。
+
+        这是"人围观 AI"的强制卡口——只要 AI 走 hub(唯一推荐路径), 它读到的串口
+        内容就必然先经过这里; 人用 hub_audit_view.py 实时镜像。审计失败绝不
+        影响转发(吞异常), 审计缺一条好过断一条链路。
+        """
+        if not self.audit_path:
+            return
+        try:
+            dev = inst.status.get("port") or "?"
+            rec = {"t": time.strftime("%H:%M:%S"),
+                   "board": (self._board_of(dev) or {}).get("name") or os.path.basename(dev),
+                   "dev": self._jack_of(dev), "action": action, "status": status}
+            if action == "send" and body:
+                req = json.loads(body)
+                rec["out"] = (req.get("text") or req.get("hex") or "")[:AUDIT_PREVIEW]
+            elif action == "receive" and payload:
+                resp = (json.loads(payload) or {}).get("data") or {}
+                text = resp.get("text") or ""
+                rec["offset"] = resp.get("offset")
+                rec["bytes"] = resp.get("bytes")
+                rec["preview"] = text[-AUDIT_PREVIEW:]   # 尾部才是最新应答
+            line = json.dumps(rec, ensure_ascii=False)
+            with self._audit_lock:
+                with open(self.audit_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except Exception:
+            pass
 
     def refuse_create(self):
         raise AgentApiError(
@@ -459,11 +499,13 @@ def main():
     parser.add_argument("--token", default="", help="网关访问令牌, 非空时请求须带 X-Agent-Token")
     parser.add_argument("--boards", default=BOARDS_DEFAULT, metavar="FILE",
                         help=f"板名映射 JSON, 默认 {BOARDS_DEFAULT}")
+    parser.add_argument("--audit", default=AUDIT_DEFAULT, metavar="FILE",
+                        help=f"AI 活动审计 JSONL(空串关闭), 默认 {AUDIT_DEFAULT}")
     args = parser.parse_args()
 
     hub = Hub(args.host, args.listen, args.scan_min, args.scan_max,
               probe_timeout=args.probe_timeout, forward_timeout=args.forward_timeout,
-              token=args.token, boards_path=args.boards)
+              token=args.token, boards_path=args.boards, audit_path=args.audit)
     server = ThreadingHTTPServer((args.host, args.listen), _Handler)
     server.hub = hub
     server.daemon_threads = True

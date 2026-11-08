@@ -225,6 +225,20 @@ agent HTTP（不抢串口）；实例用 by-path 还是 ttyUSBx 启动都能对�
 当前设备节点再比对）；两套组合并存时各挂各的 hub 分支，物理上串不了；`on` 幂等安全，
 `off/coldboot/bind` 会真操作电源，跑前想清楚。
 
+### AI 活动审计与围观（hub_audit_view.py）
+
+hub 对每个经网关的 AI 读写落一行审计（`logs/hub_audit.jsonl`：时间/板名/动作/字节数/
+发送内容/接收尾部预览）——这是**强制卡口**：AI 只要走 hub（唯一推荐路径），它读到的
+串口内容必然先经过这里。人实时围观：
+
+```bash
+tmux new-session -d -s serial-audit "python3 hub_audit_view.py -n 20"   # 常驻镜像窗口
+tmux attach -t serial-audit        # 随时进去看 AI 正在读什么发什么, Ctrl+B D 退出
+python3 hub_audit_view.py -n 100   # 或一次性回放最近 100 条
+```
+
+注意：AI 直连实例端口(832x)可绕开审计——AGENTS.md 已将其列为违规；确需封死可加防火墙规则。
+
 ### adb 按板名操作（adbq.py）
 
 RK 板的 USB adb 序列号大量重复甚至为空，多板同插时 `adb -s 序列号` 会打到错的板上。

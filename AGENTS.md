@@ -29,6 +29,9 @@ AI 的行动契约；与 README 冲突时以本文件为准。
    = 全程零字节。静默 ≠ 线断 ≠ 没电。
 7. **实例账本疑死先做活性采样**：两次 `/api/info` 采 `capture_bytes`，不涨 = 大概率
    设备重插后旧实例持死 fd，重启实例（用 by-path）而不是对着冻死账本下结论。
+8. **串口读写一律走 hub（8300），禁止直连实例端口**：网关对每次 AI 读写做审计
+   （`logs/hub_audit.jsonl`，主人用 `hub_audit_view.py` 实时围观）；直连 832x =
+   绕开审计，等同私读。
 
 ## 登记表（事实源；改文件即生效，hub/实例不用重启）
 
@@ -48,6 +51,7 @@ nohup python3 agent_hub.py >> logs/hub.log 2>&1 &
 ```
 
 实例约定：8324=TQ536治具(tmux serial-t536)、8325=TQ3588(tmux serial-3588)。
+主人围观 AI 串口活动：`tmux attach -t serial-audit`（实时镜像，已常驻）。
 改 ZCode 的 MCP 配置需重启会话才生效。
 
 ## 自检（改码后必跑对应项再提交）
