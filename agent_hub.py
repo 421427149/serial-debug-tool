@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "1.6"
+HUB_VERSION = "1.7"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -129,6 +129,7 @@ class Hub:
         self.audit_path = audit_path
         if audit_path:
             os.makedirs(os.path.dirname(audit_path), exist_ok=True)
+        self._disc_cache = None           # (monotonic, 实例列表) 短 TTL 缓存
         self._boards_cache = (None, {})   # (mtime, 映射表), mtime 变了才重读(免重启)
         self._hint_cache = {}             # agent_port -> (capture_bytes, hint)
         self._pool = ThreadPoolExecutor(PROBE_WORKERS)
@@ -138,12 +139,22 @@ class Hub:
 
     # ------------------------------------------------------------ 发现
 
+    DISC_TTL = 1.5                    # 发现结果缓存秒数: 每请求全量扫 80 口是浏览器
+                                      # 终端卡顿首因; 1.5s 内的实例增减延后一拍反映
     def discover(self):
-        """并行探测扫描区间, 返回按端口升序的实例列表。"""
+        """并行探测扫描区间, 返回按端口升序的实例列表(带短 TTL 缓存)。"""
+        now = time.monotonic()
+        if self._disc_cache and now - self._disc_cache[0] < self.DISC_TTL:
+            return self._disc_cache[1]
         ports = range(self.scan_min, self.scan_max + 1)
         found = [inst for inst in self._pool.map(self._probe, ports) if inst]
+        self._disc_cache = (now, found)
         self._log_change(found)
         return found
+
+    def disc_invalidate(self):
+        """转发失败时清缓存(实例刚退出), 下次请求强制重扫。"""
+        self._disc_cache = None
 
     def _probe(self, port):
         try:
@@ -332,6 +343,7 @@ class Hub:
         try:
             status, payload = inst.forward(method, path, body, token, self.forward_timeout)
         except _NET_ERRORS as error:
+            self.disc_invalidate()
             raise AgentApiError(502, f"实例 {inst.agent_port} 无响应(可能刚退出): {error}")
         if not payload:   # 异常对端回空体, 补一个合法错误包络
             payload = json.dumps({"ok": False, "error": f"实例 {inst.agent_port} 返回空响应"},
@@ -575,15 +587,24 @@ async function sel(i){active=i;const s=state[i]||(state[i]={off:null,buf:'',raw:
  term.focus()}
 function note2(){const t=tabs.find(x=>x.index===active);
  return t?(t.title+(t.open?'':' (串口未开)')):''}
-async function pollStream(){if(active===null||document.hidden)return;const s=state[active];
- if(!s||s.off===null)return;
- try{const d=await jget(`/api/tabs/${active}/receive?offset=${s.off}&max_bytes=16384`);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function streamLoop(){while(true){
+ if(active===null||document.hidden){await sleep(300);continue}
+ const s=state[active];if(!s||s.off===null){await sleep(200);continue}
+ const t0=Date.now();
+ try{const d=await jget(`/api/tabs/${active}/receive?offset=${s.off}&max_bytes=16384&wait_ms=400`);
   if(d.bytes>0){term.write(d.text);s.buf+=d.text;
    if(s.buf.length>200000)s.buf=s.buf.slice(-150000)}
-  s.off=d.next_offset}catch(e){}}
+  s.off=d.next_offset;
+  if(Date.now()-t0<100&&d.bytes===0)await sleep(150)   // 旧实例不认 wait_ms, 防空转
+ }catch(e){await sleep(500)}}}
 let chain=Promise.resolve();      // 键击串行化保顺序
-function rawSend(data){chain=chain.then(()=>
-  jpost(`/api/tabs/${active}/send`,{text:data,nl:false}))
+let pend="",ptab=null,ptimer=null; // 25ms 微批量: 相邻键击合并成一个 POST, 省一半以上往返
+function rawSend(data){if(ptab===null||ptab===active){pend+=data}else{flushPend();pend=data}
+ ptab=active;if(ptimer)return;ptimer=setTimeout(flushPend,25)}
+function flushPend(){ptimer=null;const chunk=pend,tab=ptab;pend="";ptab=null;
+ if(!chunk||tab===null)return;chain=chain.then(()=>
+  jpost(`/api/tabs/${tab}/send`,{text:chunk,nl:false}))
  .catch(e=>note('发送失败: '+e.message))}
 function lineKey(d){const s=state[active];
  for(const ch of d){
@@ -616,8 +637,8 @@ async function pollAI(){try{const d=await jget('/api/audit?n=30');
    .split('\n').slice(-8).join('\n')}}
  catch(e){}}
 $('ai').ondblclick=()=>$('ai').style.display=$('ai').style.display==='none'?'block':'none';
-setInterval(pollTabs,2000);setInterval(pollStream,700);setInterval(pollAI,1500);
-pollTabs();pollAI();
+setInterval(pollTabs,3000);setInterval(pollAI,2500);
+streamLoop();pollTabs();pollAI();
 </script></body></html>"""
 
 

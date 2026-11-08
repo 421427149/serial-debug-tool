@@ -172,12 +172,14 @@ class AgentChannel:
                 raise AgentApiError(503, "读取会话捕获文件失败")
         return data, offset + len(data)
 
-    def receive(self, offset=None, max_bytes=DEFAULT_READ_BYTES, tail=False):
+    def receive(self, offset=None, max_bytes=DEFAULT_READ_BYTES, tail=False, wait_ms=0):
         """读接收流。带 offset: 绝对位置随机读(不动 cursor, 可反复回看);
         不带 offset: 从服务端 cursor 续读并前移(QSerial 桥的消费式轮询兼容语义);
         tail=True(仅不带 offset 时生效, 带 offset 时忽略): 跳过积压取最新窗口——
         起点 = max(cursor, 账末-max_bytes), 起点落在行中则顺延到下一行首, cursor
-        前移到窗口末尾; 跳过的字节计入返回值 skipped, 仍在账本可带 offset 回看。"""
+        前移到窗口末尾; 跳过的字节计入返回值 skipped, 仍在账本可带 offset 回看。
+        wait_ms>0(仅带 offset 时生效): 长轮询——无新数据时服务端小睡等待至多
+        wait_ms, 数据一到立即返回, 把浏览器终端的回显延迟从轮询间隔降到几十 ms。"""
         max_bytes = max(1, min(int(max_bytes), MAX_READ_BYTES))
         with self._lock:
             cur = self._cursor
@@ -187,6 +189,11 @@ class AgentChannel:
             off = max(cur, self._snapshot_capture()[0] - max_bytes)
             skipped = off - cur
         data, next_off = self._read_raw(off, max_bytes)
+        if not data and offset is not None and int(wait_ms) > 0:
+            deadline = time.monotonic() + min(int(wait_ms), 5000) / 1000.0
+            while not data and time.monotonic() < deadline:
+                time.sleep(0.03)
+                data, next_off = self._read_raw(off, max_bytes)
         if skipped and data:
             nl = data.find(b"\n")   # 尾窗起点多半在行中, 半行开头无信息价值, 顺延到行首
             if nl >= 0:
@@ -428,7 +435,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._need(method, "GET")
             offset = self._int_arg(query, "offset", None)
             mx = self._int_arg(query, "max_bytes", DEFAULT_READ_BYTES)
-            return ch.receive(offset, mx, self._bool_arg(query, "tail", False))
+            wait = self._int_arg(query, "wait_ms", 0)
+            return ch.receive(offset, mx, self._bool_arg(query, "tail", False), wait)
         raise AgentApiError(404, "未知操作")
 
     # ------------------------------------------------------------ 小工具
