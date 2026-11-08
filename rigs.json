@@ -1,0 +1,34 @@
+{
+  "_说明": "控制组合(rig)登记表: controller=治具常量(永不因换板而变), target=受控槽位(换板/挪线后改这里或跑 rigctl <rig> bind 重探测, 旧绑定进 _history)。console 键写 by-path 链路段(如 1.4.2), 与 boards.json/adbq 同一坐标系; rigctl 也认完整 by-path 串和 ttyUSBx 过渡名",
+  "rig-A": {
+    "controller": {
+      "name": "TQ536治具",
+      "console": "1.4.2",
+      "baud": 115200,
+      "prompt": "root@TQ536",
+      "power": {
+        "method": "sysfs-gpio",
+        "gpios": [196, 197, 388, 389],
+        "on_value": 1,
+        "off_value": 0,
+        "discharge_s": 20,
+        "note": "libgpiod gpioset exit 模式设完即复位必须用 sysfs; GPIO 释放态(T536 重启)=断电; 单路归属未定位, 4 路同值操作"
+      }
+    },
+    "target": {
+      "name": "TQ3588",
+      "console": "1.4.4",
+      "baud": 1500000,
+      "adb_serial": "7a0aab8c51b5474a",
+      "alive_check": {
+        "usb_vid_pid": "2207:0006",
+        "note": "350b=Loader/MaskROM(两态同PID), 需 upgrade_tool ld 判 Mode; 系统活=0006"
+      },
+      "bound_at": "2026-11-08",
+      "bound_by": "t536-3588-power-rig 记忆(11-02 拓扑) + hub hint root@TQ3588 双证"
+    },
+    "_history": [
+      {"target": "TQ3588 console@1.4.3", "until": "2026-11-07", "note": "刷机/挪线后 3588 控制台移到 1.4.4"}
+    ]
+  }
+}
