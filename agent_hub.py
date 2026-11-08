@@ -42,9 +42,9 @@ import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "1.3"
+HUB_VERSION = "1.4"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -337,6 +337,21 @@ class Hub:
         self._audit(inst, action, body, payload, status)
         return status, payload
 
+    def audit_tail(self, n=30):
+        """取审计账最后 n 条(供浏览器 AI 活动条); 任何失败返回空表不阻塞页面。"""
+        try:
+            with open(self.audit_path, encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            return []
+        out = []
+        for line in lines[-max(1, int(n)):]:
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
+
     def _audit(self, inst, action, body, payload, status):
         """AI 串口活动审计: 每次经网关的 send/receive/open/close 落一行 JSONL。
 
@@ -407,6 +422,10 @@ class _Handler(BaseHTTPRequestHandler):
             if hub.token and self.headers.get("X-Agent-Token") != hub.token:
                 raise AgentApiError(401, "访问令牌缺失或不匹配")
             parts = urlsplit(self.path)
+            if method == "GET" and parts.path in ("/", "/ui", "/index.html"):
+                self._send_bytes(200, UI_HTML.encode("utf-8"),
+                                 ctype="text/html; charset=utf-8")
+                return
             seg = [s for s in parts.path.split("/") if s]
             status, raw, payload = self._route(hub, method, seg, parts.query)
             if raw:   # 实例回的完整包络, 字节级透传
@@ -433,6 +452,10 @@ class _Handler(BaseHTTPRequestHandler):
             return 200, False, hub.status()      # 网关无自有账本, info 即聚合状态
         if seg[1] == "tabs":
             return self._route_tabs(hub, method, seg, query)
+        if seg[1] == "audit" and len(seg) == 2:
+            self._need(method, "GET")
+            n = int(parse_qs(query).get("n", ["30"])[0])   # query 是原始串(proxy 要原样转发)
+            return 200, False, {"records": hub.audit_tail(max(1, min(n, 1000)))}
         raise AgentApiError(404, "未知路径")
 
     def _route_tabs(self, hub, method, seg, query):
@@ -467,12 +490,94 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload):
         self._send_bytes(status, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
-    def _send_bytes(self, status, data):
+    def _send_bytes(self, status, data, ctype="application/json; charset=utf-8"):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+# 浏览器控制台: 按板切换 + 实时串口流 + 网页直接发命令 + AI 活动条。
+# 增量拉流用绝对 offset 读(不消费实例 cursor, 不干扰 AI 的 tail 读); 零外部依赖。
+UI_HTML = r"""<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<title>串口控制台 · serial_hub</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+ body{margin:0;font:14px/1.5 system-ui,Consolas,monospace;background:#101418;color:#cdd6e0}
+ #bar{display:flex;gap:6px;padding:8px 10px;background:#1a2027;flex-wrap:wrap;align-items:center}
+ #bar .tab{border:1px solid #3b4757;background:#232b34;color:#cdd6e0;border-radius:6px;
+   padding:5px 12px;cursor:pointer;font:inherit}
+ #bar .tab.on{background:#2f6fed;border-color:#2f6fed;color:#fff}
+ #bar .dot{margin-left:auto;color:#7f8c9b;font-size:12px;max-width:46%;text-align:right}
+ #con{height:calc(100vh - 118px);overflow:auto;padding:10px;white-space:pre-wrap;
+   word-break:break-all;font:13px/1.45 Consolas,monospace;background:#0b0e12}
+ #foot{display:flex;gap:8px;padding:8px 10px;background:#1a2027;align-items:center}
+ #inp{flex:1;background:#0b0e12;border:1px solid #3b4757;color:#e6edf3;border-radius:6px;
+   padding:7px 10px;font:inherit}
+ button.go{background:#2f6fed;border:0;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font:inherit}
+ button.ghost{background:transparent;border:1px solid #3b4757;color:#9fb0c0;border-radius:6px;
+   padding:7px 12px;cursor:pointer;font:inherit}
+ label{color:#9fb0c0;font-size:12px;user-select:none}
+ #ai{position:fixed;right:10px;bottom:64px;width:420px;max-width:45vw;max-height:180px;overflow:auto;
+   background:rgba(26,32,39,.93);border:1px solid #3b4757;border-radius:8px;padding:6px 10px;
+   font:11px/1.6 Consolas,monospace;color:#8fd18f;white-space:pre-wrap;pointer-events:none}
+</style></head><body>
+<div id="bar"><span style="color:#7f8c9b;font-size:12px">板子:</span><span id="tabs"></span>
+ <span class="dot" id="st"></span></div>
+<div id="con"></div>
+<div id="foot">
+ <input id="inp" placeholder="输入要发到当前板子的命令, 回车或点发送">
+ <label><input type="checkbox" id="nl" checked>加换行</label>
+ <button class="go" id="send">发送</button>
+ <button class="ghost" id="clr">清屏</button>
+</div>
+<div id="ai">AI 活动条(经 hub 的读写会显示在这里)</div>
+<script>
+const $=id=>document.getElementById(id);
+let tabs=[],active=null;const state={};   // state[i]={off,buf}
+async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error('HTTP '+r.status);
+  const j=await r.json();if(!j.ok)throw new Error(j.error||'错误');return j.data}
+async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(b)});const j=await r.json();if(!j.ok)throw new Error(j.error||'错误');return j.data}
+function note(s){$('st').textContent=s}
+async function pollTabs(){try{const d=await jget('/api/tabs');tabs=d.tabs;renderTabs();
+  if(active===null&&tabs.length)sel(tabs[0].index);
+  note(tabs.length?'在线 '+tabs.length+' 板':'无实例在线')}catch(e){note('hub 不可达: '+e.message)}}
+function renderTabs(){const bar=$('tabs');bar.textContent='';
+ for(const t of tabs){const b=document.createElement('button');b.className='tab'+(t.index===active?' on':'');
+  b.textContent=(t.open?'● ':'○ ')+t.title+(t.board&&t.title!==t.board?'':'');
+  b.onclick=()=>sel(t.index);bar.appendChild(b)}}
+async function sel(i){active=i;if(!state[i])state[i]={off:null,buf:''};
+ renderTabs();draw();
+ if(state[i].off===null){try{const d=await jget(`/api/tabs/${i}/receive?tail=1&max_bytes=3000`);
+   state[i].buf=d.text;state[i].off=d.next_offset;draw()}
+  catch(e){state[i].buf='(读取失败: '+e.message+')';state[i].off=null;draw()}}}
+async function pollStream(){if(active===null||document.hidden)return;const s=state[active];
+ if(!s||s.off===null)return;
+ try{const d=await jget(`/api/tabs/${active}/receive?offset=${s.off}&max_bytes=16384`);
+  if(d.bytes>0){s.buf+=d.text;if(s.buf.length>400000)s.buf=s.buf.slice(-300000);draw()}
+  s.off=d.next_offset}catch(e){}}
+function draw(){const pre=$('con');const s=state[active];
+ const near=pre.scrollHeight-pre.scrollTop-pre.clientHeight<80;
+ pre.textContent=s?s.buf:'(选一块板子)';
+ if(near)pre.scrollTop=pre.scrollHeight}
+async function send(){const v=$('inp').value;if(!v||active===null)return;
+ try{if($('nl').checked){await jpost(`/api/tabs/${active}/send`,{text:v})}
+  else{const hx=[...new TextEncoder().encode(v)].map(b=>b.toString(16).padStart(2,'0')).join(' ');
+   await jpost(`/api/tabs/${active}/send`,{hex:hx})}
+  note('已发送 ➤ '+v);$('inp').value=''}catch(e){note('发送失败: '+e.message)}}
+async function pollAI(){try{const d=await jget('/api/audit?n=8');
+ $('ai').textContent=d.records.map(r=>r.t+' ['+r.board+'] '+
+  (r.action==='receive'?'AI读 '+r.bytes+'B':r.action==='send'?'AI发 '+(r.out||'').slice(0,60):r.action))
+  .join('\n')}catch(e){}}
+$('send').onclick=send;
+$('clr').onclick=()=>{if(active!==null){state[active].buf='';draw()}};
+$('inp').onkeydown=e=>{if(e.key==='Enter')send()};
+setInterval(pollTabs,2000);setInterval(pollStream,700);setInterval(pollAI,2500);
+pollTabs();pollAI();
+</script></body></html>"""
 
 
 def _list_serial_ports():
