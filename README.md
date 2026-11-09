@@ -251,11 +251,17 @@ hub 自带**真终端**网页（xterm.js 已 vendor 进 `webui/`，零 CDN 依�
   （审计带 `src` 来源标记，网页自己的键击不重复标注）；
 * 拉流走绝对 offset 增量读，不消费 AI 的读游标——人看和 AI 读互不干扰。
 
+**rig 状态条**（终端区上方一行，5s 自刷）：每套组合（rigs.json）的控制器/受控串口/
+USB 模式三盏灯 + **电源一键按钮**（开机/关机/冷启动/进Loader——危险动作带确认框，
+点「受控」芯片直接跳转该板终端页，动作结果回显在状态条末行）。人点按钮、AI 调接口
+走**同一条通道**：`GET /api/rigs` 看状态，`POST /api/rigs/<组合名>/<on|off|coldboot|
+enter-loader>` 执行——AI 的一键和你的按钮完全等价。
+
 ```bash
-# Windows 侧开一条 SSH 隧道(PowerShell, 保持窗口开着):
+# 现已监听内网, Windows 浏览器直开(免隧道):
+http://192.168.1.167:8300/
+# 或仍走 SSH 隧道后开 http://127.0.0.1:8300/ :
 ssh -N -L 8300:127.0.0.1:8300 embedsky@<Linux主机IP>
-# 然后浏览器打开:
-http://127.0.0.1:8300/          # 静态资源 /static/xterm.js 等由 hub 托管
 ```
 
 ### adb 按板名操作（adbq.py）

@@ -11,7 +11,8 @@ AI 的行动契约；与 README 冲突时以本文件为准。
 | hub MCP 不可用 / 脚本化 | `curl http://127.0.0.1:8300/api/...`（API 面 = README「AI Agent 通道」节）|
 | adb 操作板子 | `python3 adbq.py <板名> <adb子命令>`；**禁 adb 广播** |
 | 查谁是谁 | `curl http://127.0.0.1:8300/api/tabs`，看 title/board/hint 字段 |
-| 受控板电源 / 冷启动 | `python3 rigctl.py <组合名> status\|on\|off\|coldboot\|bind` |
+| 受控板电源/冷启动/进Loader | **一键接口** `POST /api/rigs/<组合名>/<on\|off\|coldboot\|enter-loader>`（人网页按钮走的就是它；动作异步执行，结果落在 `GET /api/rigs` 的 `last` 字段）；或命令行 `python3 rigctl.py <组合名> <同款动作>` |
+| 看组合(控制台/受控/USB)状态 | `GET /api/rigs`（控制器✔/受控✔/USB 模式一屏全览，AI 先看这个再动手）|
 
 ## 铁律
 
