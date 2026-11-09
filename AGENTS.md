@@ -12,6 +12,7 @@ AI 的行动契约；与 README 冲突时以本文件为准。
 | adb 操作板子 | `python3 adbq.py <板名> <adb子命令>`；**禁 adb 广播** |
 | 查谁是谁 | `curl http://127.0.0.1:8300/api/tabs`，看 title/board/hint 字段 |
 | 受控板电源/冷启动/进Loader | **一键接口** `POST /api/rigs/<组合名>/<on\|off\|coldboot\|enter-loader>`（人网页按钮走的就是它；动作异步执行，结果落在 `GET /api/rigs` 的 `last` 字段）；或命令行 `python3 rigctl.py <组合名> <同款动作>` |
+| **内核已 panic / 卡死要救砖** | `python3 rigctl.py <组合名> catch-uboot`（冷启动+连发 Ctrl+C 抢 U-Boot 3 秒倒计时+菜单选 `[3] USB update images` 进 Loader）。**内核死了 in-system 的 `enter-loader` 必然无效**，只有 U-Boot 这条路；`--menu` 只停在菜单不选 |
 | 看组合(控制台/受控/USB)状态 | `GET /api/rigs`（控制器✔/受控✔/USB 模式一屏全览，AI 先看这个再动手）|
 
 ## 铁律

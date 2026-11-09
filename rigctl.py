@@ -12,6 +12,8 @@
     rigctl rig-A off           # 关机(全写 0)
     rigctl rig-A coldboot      # 关机 → 放电 → 开机(冷启动, 全程约 discharge_s+5s)
     rigctl rig-A enter-loader  # 板型核对 → reboot loader → 轮询USB判定模式(全自动)
+    rigctl rig-A catch-uboot   # 救砖: 冷启动+连发Ctrl+C抓U-Boot菜单+选[3]进Loader
+                               #   (内核已panic时唯一入口; 加 --menu 停在菜单不选)
     rigctl rig-A bind          # 重探测受控板: 关电盯哪个串口灭→开电盯哪个醒,
                                # 结论自动写回 rigs.json 的 target(换板/挪线后跑这个)
     rigctl --selftest          # 链路归一化自检, 不碰设备
@@ -423,6 +425,79 @@ def act_bind_h503(rig_name, rig, rigs_path, all_rigs, confirmed=False):
               f"注意各路当前为 OFF(差分副作用), 按需 python3 rigctl.py {rig_name} on")
 
 
+def _read_offset(base, back=4000):
+    """读账本尾部 back 字节(绝对 offset 读, 不动游标), 返回清理过 ANSI 的文本。"""
+    info = _api(base, "GET", "/api/info", timeout=8)["data"]
+    end = info.get("capture_bytes") or 0
+    off = max(0, end - back)
+    d = _api(base, "GET", f"/api/tabs/0/receive?offset={off}&max_bytes={back}",
+             timeout=10)["data"]
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", d.get("text") or "")
+
+
+def act_catch_uboot(rig_name, rig, select_usb=True):
+    """抓 U-Boot 救砖: 冷启动 + 在倒计时窗口内连发 Ctrl+C 进 U-Boot 菜单。
+
+    适用场景: 内核 panic/卡死(rootfs 进不去, 没有 shell 可用), 此时 in-system 的
+    `loader` 命令无效——唯一入口是 U-Boot 的 3 秒 autoboot 倒计时
+    (`Hit key to stop autoboot('CTRL+C')`)。抓到后菜单里 [3] USB update images
+    = 进 rockusb/Loader(2207:350b)。
+
+    成功率取决于 CH340 恢复速度: 目标板供电的适配器在断电期间掉线, 上电后要等
+    它重新枚举并打开, 这期间倒计时可能已过——故上电后先等实例 open, 再密集 spam。
+    """
+    thit = find_instance(console_chain_of_rig(rig, "target"))
+    if not thit:
+        raise RigError(3, "受控板控制台无在线实例(先让 keeper/实例起来)")
+    ap = thit[0]
+    base = f"http://127.0.0.1:{ap}"
+    p = rig["controller"]["power"]
+    act_power(rig_name, rig, p.get("off_value", 0), "关机")
+    wait = int(p.get("discharge_s", 20))
+    print(f"{rig_name}: 放电 {wait}s ...", flush=True)
+    time.sleep(wait)
+    act_power(rig_name, rig, p.get("on_value", 1), "开机")
+    # 等串口实例重新打开(CH340 可能随断电掉线, 自动重连中)
+    ready = False
+    for _ in range(40):
+        try:
+            if _api(base, "GET", "/api/info", timeout=3)["data"].get("open"):
+                ready = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.3)
+    print(f"{rig_name}: 串口{'就绪' if ready else '未就绪(仍尝试)'}, 密集 Ctrl+C 覆盖倒计时 8s...",
+          flush=True)
+    for _ in range(64):          # ~8s
+        try:
+            _api(base, "POST", "/api/tabs/0/send", {"text": "\x03", "nl": False}, timeout=3)
+        except Exception:
+            pass
+        time.sleep(0.125)
+    time.sleep(0.6)
+    text = _read_offset(base, 5000)
+    if "U-boot MENU" in text or "USB update images" in text:
+        print(f"{rig_name}: ✔ 已拦截 U-Boot, 进入菜单", flush=True)
+        if not select_usb:
+            print(f"{rig_name}: 停在菜单, 可手动选 [3] USB update images")
+            return
+        for _ in range(3):        # 菜单可能重绘, 多按几次
+            _api(base, "POST", "/api/tabs/0/send", {"text": "3", "nl": False}, timeout=3)
+            time.sleep(0.4)
+        print(f"{rig_name}: 已选 [3] USB update images, 等 2207:350b ...", flush=True)
+        for _ in range(20):
+            time.sleep(1)
+            pids = [x.lower() for x in re.findall(r"2207:([0-9a-f]{4})", _lsusb(), re.I)]
+            if "350b" in pids:
+                print(f"{rig_name}: ✔ Loader 模式就绪 (2207:350b) —— 可用 upgrade_tool/RKDevTool 烧录")
+                return
+        print(f"{rig_name}: ✘ 未见 350b(菜单可能超时或需再抓一次); 尾部: {text[-200:]!r}")
+        return
+    print(f"{rig_name}: ✘ 未捕获菜单(倒计时已过/串口就绪太慢); 尾部: {text[-260:]!r}")
+    print(f"{rig_name}: 重试建议: 再跑一次 catch-uboot(多试几次命中率更高)")
+
+
 def usb_alive(target):
     vidpid = (target.get("alive_check") or {}).get("usb_vid_pid")
     if not vidpid:
@@ -544,10 +619,17 @@ def selftest():
     assert port_matches("/dev/ttyUSB3", "ttyUSB3")
     assert not port_matches("pci-0000:0c:00.3-usb-0:1.4.4:1.0-port0", "1.4.2")
     # 节点解析: 实例报 ttyUSBn、登记键是 by-path 链路(或反之)也必须对上
-    n = serial_node("1.4.4")
-    assert n and n.startswith("ttyUSB"), f"1.4.4 解析失败: {n}"
-    assert port_matches("/dev/ttyUSB3", "1.4.4") == (n == "ttyUSB3"), "节点匹配异常"
-    print(f"selftest OK: 链路归一化/节点解析(1.4.4→{n})/匹配 全过")
+    # (不写死具体口——线位随时会变; 取当前实际存在的任一单口适配器验证)
+    chains = sorted({hub_chain(x) for x in os.listdir("/dev/serial/by-path")
+                     if x.endswith("-port0")} - {None}) if os.path.isdir("/dev/serial/by-path") else []
+    if chains:
+        c = chains[0]
+        n = serial_node(c)
+        assert n and n.startswith("tty"), f"{c} 节点解析失败: {n}"
+        assert port_matches("/dev/" + n, c), f"节点匹配异常: {n} vs {c}"
+        print(f"selftest OK: 链路归一化/节点解析({c}→{n})/匹配 全过")
+    else:
+        print("selftest OK: 链路归一化/匹配 全过 (无 by-path 适配器, 跳过节点解析)")
 
 
 def main():
@@ -598,6 +680,8 @@ def main():
             act_bind(name, rig, rigs_path, rigs)
     elif action == "enter-loader":
         act_enter_loader(name, rig)
+    elif action == "catch-uboot":
+        act_catch_uboot(name, rig, select_usb="--menu" not in args)
     else:
         raise RigError(2, f"未知动作 {action!r}(status/on/off/coldboot/bind)")
 

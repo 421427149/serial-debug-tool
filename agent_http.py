@@ -186,8 +186,11 @@ class AgentChannel:
         off = cur if offset is None else int(offset)
         skipped = 0
         if tail and offset is None:
-            off = max(cur, self._snapshot_capture()[0] - max_bytes)
-            skipped = off - cur
+            end = self._snapshot_capture()[0]
+            off = max(cur, end - max_bytes)
+            if off >= end and end > 0:
+                off = max(0, end - max_bytes)   # 游标已在账末: 仍给尾窗, 否则读空
+            skipped = max(0, off - cur)
         data, next_off = self._read_raw(off, max_bytes)
         if not data and offset is not None and int(wait_ms) > 0:
             deadline = time.monotonic() + min(int(wait_ms), 5000) / 1000.0
