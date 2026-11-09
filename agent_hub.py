@@ -31,12 +31,11 @@ mcp_bridge.py 不用改, ZCode 只配一个 MCP 入口就能看所有板子:
 """
 
 import argparse
-import contextlib
 import http.client
-import io
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -47,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.5"
+HUB_VERSION = "2.6"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -456,30 +455,25 @@ class Hub:
         rigs = R.load_rigs(self._rigs_path())
         if name not in rigs:
             raise AgentApiError(404, f"无组合 {name!r}(现有: {', '.join(rigs)})")
-        if action not in ("on", "off", "coldboot", "enter-loader"):
+        if action not in ("on", "off", "coldboot", "enter-loader", "catch-uboot"):
             raise AgentApiError(400, f"未知动作 {action!r}")
 
         def worker():
-            buf = io.StringIO()
+            # 子进程执行 rigctl: 彻底隔离输出——redirect_stdout 是进程全局,
+            # 会把别的线程(如 hub 自己的实例集合日志)的 print 一起抓进来(已实测踩到)。
+            cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                "rigctl.py"), name, action]
             try:
-                with contextlib.redirect_stdout(buf), self._rig_lock:
-                    rig = rigs[name]
-                    p = (rig.get("controller") or {}).get("power") or {}
-                    if action == "on":
-                        R.act_power(name, rig, p.get("on_value", 1), "开机[网页]")
-                    elif action == "off":
-                        R.act_power(name, rig, p.get("off_value", 0), "关机[网页]")
-                    elif action == "coldboot":
-                        R.act_power(name, rig, p.get("off_value", 0), "关机[网页]")
-                        time.sleep(int(p.get("discharge_s", 20)))
-                        R.act_power(name, rig, p.get("on_value", 1), "开机[网页]")
-                    elif action == "enter-loader":
-                        R.act_enter_loader(name, rig)
-            except SystemExit as e:      # RigError 走这条
-                buf.write(f"[失败] {e}")
+                with self._rig_lock:
+                    r = subprocess.run(cmd, capture_output=True, text=True,
+                                       timeout=180)
+                out = (r.stdout or "").strip() or (r.stderr or "").strip() or "(无输出)"
+                tail = "\n".join(out.splitlines()[-3:])     # 状态条只放末几行
+            except subprocess.TimeoutExpired:
+                tail = f"[超时] {action} 超过 180s 未结束"
             except Exception as e:
-                buf.write(f"[异常] {e}")
-            self._rig_out[name] = time.strftime("%H:%M:%S ") + buf.getvalue().strip()
+                tail = f"[异常] {e}"
+            self._rig_out[name] = time.strftime("%H:%M:%S ") + f"[{action}] " + tail
 
         threading.Thread(target=worker, daemon=True).start()
         return {"started": True, "rig": name, "action": action}
@@ -525,6 +519,11 @@ class Hub:
                 rec["preview"] = text[-AUDIT_PREVIEW:]   # 尾部才是最新应答
             line = json.dumps(rec, ensure_ascii=False)
             with self._audit_lock:
+                try:
+                    if os.path.getsize(self.audit_path) > 8 * 1024 * 1024:
+                        os.replace(self.audit_path, self.audit_path + ".1")  # 轮转保一份
+                except OSError:
+                    pass
                 with open(self.audit_path, "a", encoding="utf-8") as f:
                     f.write(line + "\n")
         except Exception:
@@ -581,8 +580,9 @@ class _Handler(BaseHTTPRequestHandler):
                 fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   "webui", name)
                 ctype = "text/css" if name.endswith(".css") else "application/javascript"
-                with open(fp, "rb") as f:
-                    self._send_bytes(200, f.read(), ctype=f"{ctype}; charset=utf-8")
+                with open(fp, "rb") as f:      # 静态库版本固定, 给长缓存省流量
+                    self._send_bytes(200, f.read(), ctype=f"{ctype}; charset=utf-8",
+                                     cache="public, max-age=604800")
                 return
             seg = [s for s in parts.path.split("/") if s]
             status, raw, payload = self._route(hub, method, seg, parts.query)
@@ -655,10 +655,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload):
         self._send_bytes(status, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
-    def _send_bytes(self, status, data, ctype="application/json; charset=utf-8"):
+    def _send_bytes(self, status, data, ctype="application/json; charset=utf-8",
+                    cache="no-store"):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-store")   # 页面/接口永不缓存, 杜绝旧壳挂新API
+        self.send_header("Cache-Control", cache)   # 页面/接口 no-store, 静态库长缓存
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -755,25 +756,28 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 let errStreak=0;
 async function streamLoop(){while(true){
  if(active===null||document.hidden){await sleep(300);continue}
- const s=state[active];if(!s){await sleep(200);continue}
- if(s.off===null){   // 初次/失配重同步: 取最新尾窗(实例重启会清账本, 旧 offset 必失配)
-  try{const d=await jget(`/api/tabs/${active}/receive?tail=1&max_bytes=4000`);
+ const tab=active,s=state[tab];          // 固定本轮所属 tab, 防切页后写错画面
+ if(!s){await sleep(200);continue}
+ const show=()=>{if(active===tab)return true;return false};
+ if(s.off===null){   // 初次/失配重同步: 实例重启会清账本, 旧 offset 必失配
+  try{const d=await jget(`/api/tabs/${tab}/receive?tail=1&max_bytes=4000`);
    if(d.bytes>0){const mark='\r\n\x1b[90m⟦串口通道已重连, 已同步到最新⟧\x1b[0m\r\n';
-    term.write(mark+d.text);s.buf+=mark.replace(/\x1b\[[0-9;?]*[A-Za-z]/g,'')+d.text;
+    s.buf+=mark.replace(/\x1b\[[0-9;?]*[A-Za-z]/g,'')+d.text;
+    if(show())term.write(mark+d.text);
     if(s.buf.length>200000)s.buf=s.buf.slice(-150000)}
-   s.off=d.next_offset;errStreak=0}
+   s.off=d.next_offset;s.err=0}
   catch(e){await sleep(800)}
   continue}
  const t0=Date.now();
- try{const d=await jget(`/api/tabs/${active}/receive?offset=${s.off}&max_bytes=16384&wait_ms=400`);
-  if(d.bytes>0){term.write(d.text);s.buf+=d.text;
-   if(s.buf.length>200000)s.buf=s.buf.slice(-150000)}
-  s.off=d.next_offset;errStreak=0;
+ try{const d=await jget(`/api/tabs/${tab}/receive?offset=${s.off}&max_bytes=16384&wait_ms=400`);
+  if(d.bytes>0){s.buf+=d.text;
+   if(s.buf.length>200000)s.buf=s.buf.slice(-150000);
+   if(show())term.write(d.text)}      // 只画当前页; 别的 tab 数据留在 buf, 切回时重绘
+  s.off=d.next_offset;s.err=0;
   if(Date.now()-t0<100&&d.bytes===0)await sleep(150)   // 旧实例不认 wait_ms, 防空转
  }catch(e){
-  errStreak++;
-  // 实例重启致账本重置(报"超出已落盘范围")立刻重同步; 连续3次其他错也重同步兜底
-  if(errStreak>=3||/超出|已落盘/.test(e.message||'')){s.off=null;errStreak=0}
+  s.err=(s.err||0)+1;                 // 按 tab 计数(原全局变量会跨 tab 累积)
+  if(s.err>=3||/超出|已落盘/.test(e.message||'')){s.off=null;s.err=0}
   await sleep(500)}}}
 let chain=Promise.resolve();      // 键击串行化保顺序
 let pend="",ptab=null,ptimer=null; // 25ms 微批量: 相邻键击合并成一个 POST, 省一半以上往返
@@ -876,6 +880,7 @@ async function pollRigs(){try{const d=await jget('/api/rigs');
    ['coldboot','冷启动',r.name+': 冷启动=真断电→放电→上电, 确认?']];
   if(r.target.enter_loader_cmd)
    actDefs.push(['enter-loader','进Loader',r.name+': 下发 '+r.target.enter_loader_cmd+' 进 Loader 模式?']);
+  actDefs.push(['catch-uboot','救砖进Loader',r.name+': 冷启动后抢 U-Boot 菜单并进 Loader(内核已 panic/卡死时用, 会断电重启, 约30秒), 确认?']);
   for(const[a,lbl,cfm]of actDefs){
    const b=document.createElement('button');b.textContent=lbl;b.className='rbtn';
    b.onclick=async()=>{if(cfm&&!confirm(cfm))return;

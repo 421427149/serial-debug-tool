@@ -476,7 +476,7 @@ def act_catch_uboot(rig_name, rig, select_usb=True):
             pass
         time.sleep(0.125)
     time.sleep(0.6)
-    text = _read_offset(base, 5000)
+    text = _read_offset(base, 20000)   # spam 期间菜单会重绘多次, 窗口取大防挤出
     if "U-boot MENU" in text or "USB update images" in text:
         print(f"{rig_name}: ✔ 已拦截 U-Boot, 进入菜单", flush=True)
         if not select_usb:

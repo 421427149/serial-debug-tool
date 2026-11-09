@@ -112,11 +112,15 @@ def sanitize(name):
 
 
 def spawn(chain, filename, baud):
-    agent = next(p for p in range(PORT_MIN, PORT_MAX + 1)
-                 if p not in used_agent_ports())
+    used = used_agent_ports()
+    free = [p for p in range(PORT_MIN, PORT_MAX + 1) if p not in used]
+    if not free:
+        return None, f"agent 端口耗尽({PORT_MIN}..{PORT_MAX})"
+    agent = free[0]
     session = PREFIX + sanitize(chain)
+    # 文件名来自内核命名(无空格/引号), 仍加双引号作防御; 波特率强制整数
     cmd = (f"while true; do python3 serial_debug.py "
-           f"-p /dev/serial/by-path/{filename} -b {baud} "
+           f'-p "/dev/serial/by-path/{filename}" -b {int(baud)} '
            f"--agent-http {agent} --no-color; sleep 2; done")
     r = sh(["tmux", "new-session", "-d", "-s", session, "-c", HERE, cmd])
     if r.returncode:

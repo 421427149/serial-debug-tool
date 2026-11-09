@@ -195,7 +195,7 @@ class AgentChannel:
         if not data and offset is not None and int(wait_ms) > 0:
             deadline = time.monotonic() + min(int(wait_ms), 5000) / 1000.0
             while not data and time.monotonic() < deadline:
-                time.sleep(0.03)
+                time.sleep(0.1)     # 每轮要 flush 账本(持 log_lock), 30ms 太密会拖 rx
                 data, next_off = self._read_raw(off, max_bytes)
         if skipped and data:
             nl = data.find(b"\n")   # 尾窗起点多半在行中, 半行开头无信息价值, 顺延到行首
