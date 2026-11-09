@@ -47,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.4"
+HUB_VERSION = "2.5"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -752,16 +752,29 @@ async function sel(i){active=i;const s=state[i]||(state[i]={off:null,buf:'',raw:
 function note2(){const t=tabs.find(x=>x.index===active);
  return t?(t.title+(t.open?'':' (串口未开)')):''}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let errStreak=0;
 async function streamLoop(){while(true){
  if(active===null||document.hidden){await sleep(300);continue}
- const s=state[active];if(!s||s.off===null){await sleep(200);continue}
+ const s=state[active];if(!s){await sleep(200);continue}
+ if(s.off===null){   // 初次/失配重同步: 取最新尾窗(实例重启会清账本, 旧 offset 必失配)
+  try{const d=await jget(`/api/tabs/${active}/receive?tail=1&max_bytes=4000`);
+   if(d.bytes>0){const mark='\r\n\x1b[90m⟦串口通道已重连, 已同步到最新⟧\x1b[0m\r\n';
+    term.write(mark+d.text);s.buf+=mark.replace(/\x1b\[[0-9;?]*[A-Za-z]/g,'')+d.text;
+    if(s.buf.length>200000)s.buf=s.buf.slice(-150000)}
+   s.off=d.next_offset;errStreak=0}
+  catch(e){await sleep(800)}
+  continue}
  const t0=Date.now();
  try{const d=await jget(`/api/tabs/${active}/receive?offset=${s.off}&max_bytes=16384&wait_ms=400`);
   if(d.bytes>0){term.write(d.text);s.buf+=d.text;
    if(s.buf.length>200000)s.buf=s.buf.slice(-150000)}
-  s.off=d.next_offset;
+  s.off=d.next_offset;errStreak=0;
   if(Date.now()-t0<100&&d.bytes===0)await sleep(150)   // 旧实例不认 wait_ms, 防空转
- }catch(e){await sleep(500)}}}
+ }catch(e){
+  errStreak++;
+  // 实例重启致账本重置(报"超出已落盘范围")立刻重同步; 连续3次其他错也重同步兜底
+  if(errStreak>=3||/超出|已落盘/.test(e.message||'')){s.off=null;errStreak=0}
+  await sleep(500)}}}
 let chain=Promise.resolve();      // 键击串行化保顺序
 let pend="",ptab=null,ptimer=null; // 25ms 微批量: 相邻键击合并成一个 POST, 省一半以上往返
 function rawSend(data){if(ptab===null||ptab===active){pend+=data}else{flushPend();pend=data}
