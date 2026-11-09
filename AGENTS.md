@@ -60,6 +60,7 @@ nohup python3 agent_hub.py >> logs/hub.log 2>&1 &
 python3 test_agent_http.py        # 20 项, 自包含不碰真设备
 python3 adbq.py --selftest
 python3 rigctl.py --selftest
+python3 test_ui_smoke.py          # 改 UI_HTML 后必跑: JS语法/重复定义/翻译器行为
 ```
 
 提交信息按天嵌规范：`(等级)[type][uart] 描述`，描述含原因+解决方式。
