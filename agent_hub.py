@@ -867,7 +867,7 @@ async function pollRigs(){try{const d=await jget('/api/rigs');
    row.appendChild(l)}
   box.appendChild(row)}}catch(e){$('rigs').textContent='rig 状态获取失败: '+e.message}}
 
-function devOf(t)function devOf(t){const m=(t||'').match(/usb-([\d.:]+)/);
+function devOf(t){const m=(t||'').match(/usb-([\d.:]+)/);
  if(m){const g=m[1].split(':');return g.length>1?g[1]:g[0]}
  const b=(t||'').split('/').pop();return /^tty/.test(b)?b:null}
 async function pollAI(){try{const d=await jget('/api/audit?n=30');
