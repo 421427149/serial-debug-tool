@@ -41,18 +41,17 @@ AI 的行动契约；与 README 冲突时以本文件为准。
   换板/挪线后跑 `rigctl <组合名> bind`（会真实断电再上电一次）自动重探测回填，
   旧绑定进 `_history`。
 
-## 新板子上线 / 起新实例
+## 新板子上线 = 插线即可（serial_keeper 守护全自动）
 
-```bash
-# 每块板一个实例, 在 tmux 里起(人可随时 attach 看日志), hub 自动发现:
-tmux new-session -d -s serial-<名> "python3 serial_debug.py \
-  -p /dev/serial/by-path/<物理口路径> -b <波特率> --agent-http <8321..8400空闲口> --no-color"
-# hub 常驻(已被 ZCode MCP 依赖, 检查: curl -s http://127.0.0.1:8300/api/status):
-nohup python3 agent_hub.py >> logs/hub.log 2>&1 &
-```
+**串口插上就有、拔掉自动收、线挪了自动跟**——`serial_keeper.py`（tmux serial-keeper 常驻）
+盯 /dev/serial/by-path：新单口适配器（-port0 结尾）几秒内自动起实例（默认 1500000，
+特例写 keeper.json，如 {"1.4.2":{"baud":115200}}）；消失超 120s 自动清理释放 agent 口，
+回来自动重起。hub 自动发现 → 网页自动显示（hint 自动命名）。**AI 不要再手动起实例**，
+仅两种情况动手：板子输出全静默想换波特率（改 keeper.json 后 kill 对应 serial-auto-* 会话
+即自动重起）、要给口起正式板名（改 boards.json）。
 
-实例约定：8324=TQ536治具(tmux serial-t536)、8325=TQ3588(tmux serial-3588)。
-主人围观 AI 串口活动：`tmux attach -t serial-audit`（实时镜像，已常驻）。
+人工/特殊实例照旧不受管：serial-t536(8324)、serial-3588(8325)、serial-compat(8321 兼容门)、
+serial-audit(审计镜像)。hub 常驻检查: `curl -s http://127.0.0.1:8300/api/status`。
 改 ZCode 的 MCP 配置需重启会话才生效。
 
 ## 自检（改码后必跑对应项再提交）
@@ -62,6 +61,7 @@ python3 test_agent_http.py        # 20 项, 自包含不碰真设备
 python3 adbq.py --selftest
 python3 rigctl.py --selftest
 python3 test_ui_smoke.py          # 改 UI_HTML 后必跑: JS语法/重复定义/翻译器行为
+python3 serial_keeper.py --status # keeper 管理视图(实例缺失会自动补, 无需手动起)
 ```
 
 提交信息按天嵌规范：`(等级)[type][uart] 描述`，描述含原因+解决方式。

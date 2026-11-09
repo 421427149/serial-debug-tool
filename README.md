@@ -179,7 +179,8 @@ serial_debug 实例自动发现、聚合成 QSerial 风格的**多 Tab API**，`
 
 ```bash
 nohup python3 agent_hub.py >> logs/hub.log 2>&1 &      # 网关监听 8300(须在扫描区间外)
-# 每块板子各起一个实例(终端/tmux 里, 人要看日志), 出现后自动进 Tab 列表:
+tmux new-session -d -s serial-keeper "python3 serial_keeper.py"   # 串口实例守护(推荐常驻)
+# 手动起实例的方式(一般不需要了——serial_keeper 守护会对新适配器自动起实例):
 tmux new-session -d -s serial-usb1 "python3 serial_debug.py -p /dev/ttyUSB1 -b 1500000 --agent-http 8322 --no-color"
 # ZCode/Claude 只配一个入口, 指向网关:
 { "args": [".../mcp_bridge.py", "--port", "8300", "--timeout", "60"] }
