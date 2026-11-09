@@ -47,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.3"
+HUB_VERSION = "2.4"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -672,7 +672,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/xterm.css">
 <style>
- html,body{height:100%;margin:0}
+ html,body{height:100%;margin:0;overflow:hidden}
  body{font:13px Consolas,monospace;background:#0b0e12;color:#cdd6e0;
    display:flex;flex-direction:column}
  #bar{display:flex;gap:6px;padding:7px 10px;background:#151a20;flex-wrap:wrap;align-items:center}
@@ -680,10 +680,18 @@ UI_HTML = r"""<!DOCTYPE html>
    padding:4px 12px;cursor:pointer;font:13px Consolas,monospace}
  .tab.on{background:#2f6fed;border-color:#2f6fed;color:#fff}
  #st{margin-left:auto;color:#7f8c9b;font-size:12px;max-width:42%;text-align:right}
- #term{flex:1;min-height:0;padding:4px 8px}
- #rigs{display:flex;flex-direction:column;gap:4px;padding:6px 10px;
-   background:#12161c;border-bottom:1px solid #232b34;font-size:12px}
- .rig{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+ #term{flex:1;min-height:0;padding:4px 8px;overflow:hidden}
+ #rigs{display:flex;flex-direction:column;gap:3px;padding:5px 10px;
+   background:#12161c;border-bottom:1px solid #232b34;font-size:12px;
+   flex-shrink:0;cursor:default}
+ #rigs.folded .rig{display:none}
+ #rigs.folded{padding:2px 10px}
+ #rigs.folded::after{content:"rig 状态条已收起(双击展开)";color:#4a5568;font-size:11px}
+ .rig{display:flex;gap:8px;align-items:center;white-space:nowrap;
+   overflow-x:auto;scrollbar-width:thin;scrollbar-color:#3b4757 transparent}
+ .rig::-webkit-scrollbar{height:4px}
+ .rig::-webkit-scrollbar-thumb{background:#3b4757;border-radius:2px}
+ .rig .chip,.rig .rbtn,.rig b{flex-shrink:0}
  .chip{border-radius:5px;padding:1px 7px;background:#1d242c;border:1px solid #3b4757}
  .chip.ok{color:#7ee787;border-color:#2ea043}
  .chip.bad{color:#ff7b72;border-color:#c93c37}
@@ -692,7 +700,7 @@ UI_HTML = r"""<!DOCTYPE html>
  .rbtn{background:#232b34;border:1px solid #3b4757;color:#cdd6e0;border-radius:5px;
    padding:1px 9px;cursor:pointer;font:12px Consolas,monospace}
  .rbtn:hover{background:#2f6fed;color:#fff}
- .last{color:#7f8c9b;font-size:11px;width:100%}
+ .last{color:#7f8c9b;font-size:11px;overflow:hidden;text-overflow:ellipsis}
  #ai{position:fixed;right:10px;bottom:10px;width:430px;max-width:45vw;max-height:170px;
    overflow:auto;background:rgba(21,26,32,.94);border:1px solid #3b4757;border-radius:8px;
    padding:6px 10px;font:11px/1.6 Consolas,monospace;color:#8fd18f;white-space:pre-wrap;
@@ -890,6 +898,9 @@ async function pollAI(){try{const d=await jget('/api/audit?n=30');
    +(g?'  ┋ '+g.slice(0,60):'')).split('\n').slice(-8).join('\n')}}
  catch(e){}}
 $('ai').ondblclick=()=>$('ai').style.display=$('ai').style.display==='none'?'block':'none';
+$('rigs').ondblclick=()=>$('rigs').classList.toggle('folded');
+new ResizeObserver(()=>{try{fit.fit()}catch(e){}}).observe($('rigs'));
+new ResizeObserver(()=>{try{fit.fit()}catch(e){}}).observe($('term'));
 setInterval(pollTabs,3000);setInterval(pollAI,2500);setInterval(pollRigs,5000);
 streamLoop();pollTabs();pollAI();pollRigs();
 </script></body></html>"""
