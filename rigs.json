@@ -22,15 +22,15 @@
     },
     "target": {
       "name": "TQ3588",
-      "console": "1.4.4",
+      "console": "1.4.3",
       "baud": 1500000,
       "adb_serial": "7a0aab8c51b5474a",
       "alive_check": {
         "usb_vid_pid": "2207:0006",
         "note": "350b=Loader/MaskROM(两态同PID), 需 upgrade_tool ld 判 Mode; 系统活=0006"
       },
-      "bound_at": "2026-11-08",
-      "bound_by": "t536-3588-power-rig 记忆(11-02 拓扑) + hub hint root@TQ3588 双证",
+      "bound_at": "2026-11-09 14:57",
+      "bound_by": "串口静默排查: 1.4.4 适配器消失, 现场探测 1.4.3 出 TQ3588 提示符",
       "enter_loader_cmd": "loader",
       "enter_loader_note": "固件init横幅记载: press ENTER for shell | Ctrl+L or `loader` -> Loader mode (2026-11-08 实测横幅存在)"
     },
@@ -39,6 +39,11 @@
         "target": "TQ3588 console@1.4.3",
         "until": "2026-11-07",
         "note": "刷机/挪线后 3588 控制台移到 1.4.4"
+      },
+      {
+        "target": "TQ3588 console@1.4.4",
+        "until": "2026-11-09 14:57",
+        "note": "烧录会话期间线被挪回老位置"
       }
     ]
   },
