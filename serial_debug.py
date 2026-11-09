@@ -325,6 +325,10 @@ def _lcp(words):
 
 # ---------------------------------------------------------------- 主工具类
 
+def now_ts():
+    return time.time()
+
+
 class SerialTool:
     def __init__(self, port=None, baud=115200, bits=8, parity="N", stop=1,
                  flow="none", nl="lf", enc="utf-8", hex_mode=False,
@@ -350,6 +354,9 @@ class SerialTool:
         self.dtr_on = True
         self.rts_on = True
         self.agent = None          # AI Agent 通道(--agent-http 时由 agent_http.attach 注入)
+        self.auto_reopen = True    # 串口被拔出/占用断开后自动重开(板子重启/USB 重枚举场景)
+        self.dead_at = 0.0         # 最近一次断线时刻(time.time())
+        self.reopen_delay = 3.0    # 断线后等多久重试(设备回来需要时间)
 
         self.ser = None            # 当前串口对象(仅主线程创建/关闭)
         self.running = True
@@ -450,9 +457,11 @@ class SerialTool:
             pass
         with self.ser_lock:
             self.ser = s
+        self.dead_at = 0.0
         self.note(f"已打开 {self.port} @ {self.baud}")
 
     def close_port(self):
+        self.dead_at = 0.0          # 主动关闭不触发自动重连
         with self.ser_lock:
             s, self.ser = self.ser, None
         if s:
@@ -470,7 +479,39 @@ class SerialTool:
                 s.close()
             except Exception:
                 pass
-        self.note(reason + " (输入 /open 可重连)")
+        self.dead_at = time.time()
+        self.note(reason + (" (自动重连中)" if self.auto_reopen else " (输入 /open 可重连)"))
+
+    def try_reopen(self):
+        """断线后静默重开(自动重连): 成功返回 True, 失败保持 False 等下次退避重试。
+
+        不打断进程、不新建账本——账本(offset)连续, 网页/AI 侧读位置不失效。
+        """
+        if not self.port:
+            return False
+        try:
+            s = serial.serial_for_url(
+                self.port, baudrate=self.baud,
+                bytesize=self.bits, parity=PARITY_MAP.get(self.parity, "N"),
+                stopbits=self.stopbits,
+                timeout=TICK, write_timeout=2.0,
+                xonxoff=self.xonxoff, rtscts=self.rtscts)
+        except Exception:
+            return False        # 设备还没回来, 静默等下一轮
+        try:
+            s.set_buffer_size(rx_size=2 * 1024 * 1024, tx_size=64 * 1024)
+        except Exception:
+            pass
+        try:
+            s.dtr = self.dtr_on
+            s.rts = self.rts_on
+        except Exception:
+            pass
+        with self.ser_lock:
+            self.ser = s
+        self.dead_at = 0.0
+        self.note(f"已自动重连 {self.port} @ {self.baud}")
+        return True
 
     # ------------------------------------------------------------ 接收线程
 
@@ -1172,6 +1213,11 @@ class SerialTool:
             self.drain_notices()
             if self.agent:
                 self.agent.drain_cmds()   # AI 请求的操作在主线程执行(串口对象只在主线程动)
+            # 自动重连: 串口被拔出(板子重启/USB 重枚举)后自己接回来, 退避重试
+            if self.auto_reopen and self.ser is None and self.dead_at:
+                if now_ts() - self.dead_at >= self.reopen_delay:
+                    if not self.try_reopen():
+                        self.dead_at = now_ts()   # 失败则按退避再等一轮
             if self.kbd.ok:
                 n = 0
                 try:
@@ -1291,6 +1337,8 @@ def main():
     ap.add_argument("--budget", type=int, default=DEFAULT_BUDGET,
                     help="每 50ms 最多打印的字节数, 默认 65536")
     ap.add_argument("--no-color", action="store_true", help="关闭 ANSI 颜色/重绘")
+    ap.add_argument("--no-auto-reopen", dest="auto_reopen", action="store_false",
+                    help="串口断开后不自动重连(默认自动重连, 适配板子重启/USB 重枚举)")
     ap.add_argument("--agent-http", nargs="?", const=8321, type=int, default=None, metavar="PORT",
                     help="开启本地 AI Agent 通道(默认端口 8321): AI 可经 HTTP 按偏移账本读"
                          "接收流/收事件/发指令, 与本地屏显互不依赖(人看终端的同时 AI 也能看)")
@@ -1323,6 +1371,7 @@ def main():
                    flow=args.flow, hex_mode=args.hex, hexsend=args.hexsend,
                    ts=args.ts, color=not args.no_color, budget=args.budget,
                    log_path=args.log, capture=capture)
+    t.auto_reopen = args.auto_reopen
     if args.agent_http:
         try:
             from agent_http import attach

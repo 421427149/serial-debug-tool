@@ -76,6 +76,19 @@ def running_targets():
     return targets
 
 
+def device_in_use(by_path):
+    """真实设备节点是否已被别的进程占用(fuser 查 fd 持有者)。
+
+    只比对 -p 参数会漏: 另一个实例可能用易失名(/dev/ttyUSBx)打开同一个设备,
+    参数对不上但 fd 确实被占——不查就会两个实例抢一个口(实测踩过)。
+    """
+    real = os.path.realpath(by_path)
+    if not os.path.exists(real):
+        return False
+    r = sh(["fuser", "-s", real])      # -s 静默; rc=0 表示有进程持有
+    return r.returncode == 0
+
+
 def used_agent_ports():
     ports = set(IGNORE_AGENT_PORTS)
     r = sh(["pgrep", "-af", "agent-http"])
@@ -142,6 +155,8 @@ def cycle(cfg, quiet=False):
             continue
         if chain in mine:
             continue                      # 自己的会话还在(进程也许在重启间隙)
+        if device_in_use(full):
+            continue                      # 已被别的实例用易失名占着, 不抢
         if chain in cfg.get("deny", []):
             continue
         baud = (cfg.get(chain) or {}).get("baud", DEFAULT_BAUD)
