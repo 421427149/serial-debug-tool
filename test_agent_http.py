@@ -182,19 +182,22 @@ check("T5 对令牌 200", st == 200 and resp["data"]["token_required"] is True)
 # ---------------------------------------------------------------- T6 QSerial 桥原样复用
 from mcp_bridge import McpBridge
 br = McpBridge(BASE)
+# 旧名(qserial_*)作为别名必须继续可用——在线会话靠它不断
 r = br.call_tool("qserial_status", {})
+assert not r.get("isError"), r
+r = br.call_tool("zops_status", {})
 check("T6 桥 status", not r["isError"] and json.loads(r["content"][0]["text"])["name"] == "serial_debug")
-r = br.call_tool("qserial_list_tabs", {})
+r = br.call_tool("zops_list_tabs", {})
 tabs = json.loads(r["content"][0]["text"])["tabs"]
 check("T6 桥 list_tabs 单 Tab", not r["isError"] and len(tabs) == 1 and tabs[0]["index"] == 0)
 tx_before = t.tx_total
-r = br.call_tool("qserial_send", {"index": 0, "text": "via-mcp-bridge"})
+r = br.call_tool("zops_send", {"index": 0, "text": "via-mcp-bridge"})
 sent = json.loads(r["content"][0]["text"])
 check("T6 桥 send", not r["isError"] and sent["sent"] is True, r["content"][0]["text"])
-r = br.call_tool("qserial_read", {"index": 0, "max_bytes": 65536})
+r = br.call_tool("zops_read", {"index": 0, "max_bytes": 65536})
 rd = json.loads(r["content"][0]["text"])
 check("T6 桥 read 返回 text/next_offset", not r["isError"] and "next_offset" in rd, r["content"][0]["text"])
-r = br.call_tool("qserial_create_tab", {})
+r = br.call_tool("zops_create_tab", {})
 check("T6 create_tab 明确拒绝(单会话)", r["isError"] and "Tab 0" in r["content"][0]["text"])
 
 # ---------------------------------------------------------------- T7 尾部优先(tail)读
@@ -220,7 +223,7 @@ while time.time() < deadline:
     time.sleep(0.02)
 check("T7 洪水全部落盘", resp["data"]["capture_bytes"] == pre_end + len(flood),
       f"capture={resp['data']['capture_bytes']} 期望={pre_end + len(flood)}")
-r = br.call_tool("qserial_read", {"index": 0, "max_bytes": 1024})   # MCP 默认 tail=1
+r = br.call_tool("zops_read", {"index": 0, "max_bytes": 1024})   # MCP 默认 tail=1
 d7 = json.loads(r["content"][0]["text"])
 check("T7 默认读拿到尾部窗口含应答标记",
       not r["isError"] and 900 < d7["bytes"] <= 1024 and "TAILMARK-7f3a" in d7["text"],
@@ -235,10 +238,10 @@ check("T7 消费后 pending 归零", resp["data"]["tabs"][0]["pending_bytes"] ==
 st, resp = http("GET", BASE, f"/api/tabs/0/receive?offset={d7['offset']}&max_bytes={d7['bytes']}")
 d7b = resp["data"]
 check("T7 带 offset 回看窗口内容一致(缓存按需)", d7b["hex"] == d7["hex"] and d7b["cursor"] == d7["cursor"])
-r = br.call_tool("qserial_read", {"index": 0, "tail": False, "max_bytes": 4096})
+r = br.call_tool("zops_read", {"index": 0, "tail": False, "max_bytes": 4096})
 d7c = json.loads(r["content"][0]["text"])
 check("T7 tail=false 退回 FIFO 且已无积压", not r["isError"] and d7c["bytes"] == 0 and d7c["skipped"] == 0)
-r = br.call_tool("qserial_read", {"index": 0, "offset": d7["offset"], "max_bytes": 32})
+r = br.call_tool("zops_read", {"index": 0, "offset": d7["offset"], "max_bytes": 32})
 d7d = json.loads(r["content"][0]["text"])
 check("T7 桥 offset 透传回看(不动游标)",
       not r["isError"] and d7d["offset"] == d7["offset"] and d7d["bytes"] == 32 and d7d["cursor"] == d7["cursor"])

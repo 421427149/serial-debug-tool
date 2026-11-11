@@ -1,14 +1,17 @@
-# AGENTS.md — AI 使用须知（动手前读完本文件）
+# AGENTS.md — ZOps 使用须知（AI 动手前读完本文件）
 
-本仓库 = 抗洪水串口调试终端 + 多板 AI 观察控制体系。细节文档在 README.md，本文件只写
-AI 的行动契约；与 README 冲突时以本文件为准。
+**ZOps（Z 操作台）= 给 AI 用的多板调试操作台**：串口观察、烧录/进 Loader、上下电。
+本体是抗洪水串口终端 `serial_debug.py`；`agent_hub.py`（网关，8300）把它聚合成多板
+统一入口；`rigctl.py` 管电源/救砖，`serial_keeper.py` 管实例生命周期。
+
+细节文档在 README.md，本文件只写 AI 的行动契约；与 README 冲突时以本文件为准。
 
 ## 工具选型（按目的）
 
 | 你要做什么 | 用什么 |
 |---|---|
-| 看板子串口输出 / 发命令 | MCP `qserial_*` 工具（入口 `serialdev` → hub:8300）|
-| hub MCP 不可用 / 脚本化 | `curl http://127.0.0.1:8300/api/...`（API 面 = README「AI Agent 通道」节）|
+| 看板子串口输出 / 发命令 | MCP `zops_*` 工具（入口 `serialdev` → hub:8300）。旧名 `qserial_*` 仍作别名照收 |
+| ZOps 网关不可用 / 脚本化 | `curl http://127.0.0.1:8300/api/...`（API 面 = README「AI Agent 通道」节）|
 | adb 操作板子 | `python3 adbq.py <板名> <adb子命令>`；**禁 adb 广播** |
 | 查谁是谁 | `curl http://127.0.0.1:8300/api/tabs`，看 title/board/hint 字段 |
 | 受控板电源/冷启动/进Loader | **一键接口** `POST /api/rigs/<组合名>/<on\|off\|coldboot\|enter-loader>`（人网页按钮走的就是它；动作异步执行，结果落在 `GET /api/rigs` 的 `last` 字段）；或命令行 `python3 rigctl.py <组合名> <同款动作>` |

@@ -1,4 +1,4 @@
-"""QSerial MCP stdio 桥接：把 MCP 工具调用转发到 QSerial 内置 HTTP 服务。
+"""ZOps MCP stdio 桥接：把 MCP 工具调用转发到 QSerial 内置 HTTP 服务。
 
 由 MCP 客户端（如 ZCode、Claude Desktop）作为子进程启动，通过标准输入输出按
 newline-delimited JSON-RPC 2.0 通信；本脚本不直接操作串口，串口能力全部经
@@ -20,32 +20,32 @@ BRIDGE_VERSION = "1.0"
 _TAB_INDEX_SCHEMA = {
     "type": "integer",
     "minimum": 0,
-    "description": "工作 Tab 序号，先调用 qserial_list_tabs 获取",
+    "description": "工作 Tab 序号，先调用 zops_list_tabs 获取",
 }
 
 TOOL_DEFINITIONS = [
     {
-        "name": "qserial_status",
+        "name": "zops_status",
         "description": "获取 QSerial 服务状态与应用版本。",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "qserial_list_ports",
+        "name": "zops_list_ports",
         "description": "列出本机当前可用的串口。",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "qserial_list_tabs",
+        "name": "zops_list_tabs",
         "description": "列出全部工作 Tab，包括 index、串口号、开关状态、收发计数和待读取字节数。",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "qserial_create_tab",
+        "name": "zops_create_tab",
         "description": "在 QSerial 主栏新建一个工作 Tab，返回新 Tab 的 index。",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "qserial_open_port",
+        "name": "zops_open_port",
         "description": "打开指定 Tab 的串口，可选覆盖串口参数；返回最终开关状态。",
         "inputSchema": {
             "type": "object",
@@ -62,7 +62,7 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "qserial_close_port",
+        "name": "zops_close_port",
         "description": "关闭指定 Tab 的串口，返回最终开关状态。",
         "inputSchema": {
             "type": "object",
@@ -71,7 +71,7 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "qserial_send",
+        "name": "zops_send",
         "description": "向指定 Tab 发送数据。text 与 hex 必须二选一；TEXT 的换行按该 Tab 发送配置转换，HEX 为十六进制字符串（如 01 A2）。",
         "inputSchema": {
             "type": "object",
@@ -84,7 +84,7 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "qserial_read",
+        "name": "zops_read",
         "description": "读取指定 Tab 的接收数据。默认 tail 模式：积压刷屏时直接取最新 max_bytes 尾部窗口（起点对齐行首），跳过的积压字节计入 skipped 且仍在磁盘账本，可带 offset 回看；tail=false 改为自上次读取位置 FIFO 续读；带 offset 为绝对位置回看（不消费、不动游标、可反复读）。返回 text/hex 双格式。",
         "inputSchema": {
             "type": "object",
@@ -145,31 +145,39 @@ class McpBridge:
         return body
 
     def call_tool(self, name, arguments):
-        """执行工具并返回 MCP 工具结果（content/isError）。"""
+        """执行工具并返回 MCP 工具结果（content/isError）。
+
+        工具名归一化: 对外是 zops_*（ZOps 命名），但历史上是 qserial_*（桥源自
+        QSerial）。两者都接受——已经连着的老会话不需重连，新会话看到的是 ZOps 名。
+        """
+        for prefix in ("zops_", "qserial_"):
+            if isinstance(name, str) and name.startswith(prefix):
+                name = "zops_" + name[len(prefix):]
+                break
         arguments = arguments or {}
         try:
-            if name == "qserial_status":
+            if name == "zops_status":
                 data = self._request("GET", "/api/status")
-            elif name == "qserial_list_ports":
+            elif name == "zops_list_ports":
                 data = self._request("GET", "/api/ports")
-            elif name == "qserial_list_tabs":
+            elif name == "zops_list_tabs":
                 data = self._request("GET", "/api/tabs")
-            elif name == "qserial_create_tab":
+            elif name == "zops_create_tab":
                 data = self._request("POST", "/api/tabs", {})
-            elif name == "qserial_open_port":
+            elif name == "zops_open_port":
                 index = self._require_index(arguments)
                 data = self._request("POST", f"/api/tabs/{index}/open", self._open_arguments(arguments))
-            elif name == "qserial_close_port":
+            elif name == "zops_close_port":
                 index = self._require_index(arguments)
                 data = self._request("POST", f"/api/tabs/{index}/close", {})
-            elif name == "qserial_send":
+            elif name == "zops_send":
                 index = self._require_index(arguments)
                 has_text, has_hex = "text" in arguments, "hex" in arguments
                 if has_text == has_hex:
                     raise ValueError("text 与 hex 必须提供且只能提供其一")
                 body = {"text": arguments["text"]} if has_text else {"hex": arguments["hex"]}
                 data = self._request("POST", f"/api/tabs/{index}/send", body)
-            elif name == "qserial_read":
+            elif name == "zops_read":
                 index = self._require_index(arguments)
                 params = []
                 if arguments.get("max_bytes") is not None:
@@ -219,7 +227,7 @@ class McpBridge:
             result = {
                 "protocolVersion": requested if isinstance(requested, str) and requested else PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "qserial-mcp", "version": BRIDGE_VERSION},
+                "serverInfo": {"name": "zops-mcp", "version": BRIDGE_VERSION},
             }
             return self._success(message_id, result)
         if method == "ping":

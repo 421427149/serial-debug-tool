@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""agent_hub.py —— serial_debug 多实例聚合网关(多板子 × 一个 AI Agent 入口)。
+"""agent_hub.py —— ZOps 网关: serial_debug 多实例聚合(多板子 × 一个 AI 入口)。
 
 背景: serial_debug.py 一个进程只管一个串口, agent_http.py 的 API 面固定单 Tab;
 要同时看多块板子, 只能一个实例配一个 MCP 入口, 板子多了入口爆炸。本网关把
@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.6"
+HUB_VERSION = "2.7"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -199,7 +199,7 @@ class Hub:
 
     def status(self):
         found = self.discover()
-        return {"name": "serial_hub", "version": HUB_VERSION,
+        return {"name": "zops", "version": HUB_VERSION,
                 "agent_for": f"{INSTANCE_NAME} 1.1+agent",
                 "listen_port": self.listen_port,
                 "scan_range": [self.scan_min, self.scan_max],
@@ -961,7 +961,7 @@ def main():
     server = ThreadingHTTPServer((args.host, args.listen), _Handler)
     server.hub = hub
     server.daemon_threads = True
-    print(f"[hub] serial_debug 聚合网关 v{HUB_VERSION} 监听 "
+    print(f"[hub] ZOps 网关 v{HUB_VERSION} (聚合 serial_debug 实例) 监听 "
           f"http://{args.host}:{args.listen} (扫描 {args.scan_min}..{args.scan_max})", flush=True)
     try:
         server.serve_forever(poll_interval=0.5)
