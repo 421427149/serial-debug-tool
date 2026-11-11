@@ -1,0 +1,13 @@
+[Unit]
+Description=ZOps keeper - serial instance supervisor
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/custom_def/empty/串口工具
+ExecStart=/usr/bin/python3 /custom_def/empty/串口工具/serial_keeper.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

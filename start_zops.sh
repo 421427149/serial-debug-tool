@@ -25,6 +25,24 @@ if [ "${1:-}" = "--restart" ]; then
     sleep 1
 fi
 
+# 优先走 systemd 用户服务(装了就用它, 崩溃/被杀会自动重启)
+if systemctl --user list-unit-files zops-hub.service >/dev/null 2>&1; then
+    systemctl --user start zops-hub.service zops-keeper.service 2>/dev/null
+    if systemctl --user is-active --quiet zops-hub.service; then
+        echo "[ZOps] 已交由 systemd 管理 (zops-hub / zops-keeper)"
+        echo
+        echo "--- 状态 ---"
+        curl -s --max-time 5 http://127.0.0.1:8300/api/status 2>/dev/null | "$PY" -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)['data']
+    print(f\"网关 {d['name']} v{d['version']} | 在线板子 {d['tab_count']}\")
+except Exception:
+    print('(网关启动中…)')" 2>/dev/null
+        exit 0
+    fi
+fi
+
 # 网关：聚合所有 serial_debug 实例 → 一个 MCP 入口 + 网页终端
 if ! ss -tln 2>/dev/null | grep -q ":8300 "; then
     nohup "$PY" agent_hub.py --host 0.0.0.0 --ignore-ports 8321 >> logs/hub.log 2>&1 &

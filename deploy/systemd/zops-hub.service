@@ -1,0 +1,15 @@
+[Unit]
+Description=ZOps hub - multi-board serial gateway (:8300)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/custom_def/empty/串口工具
+ExecStart=/usr/bin/python3 /custom_def/empty/串口工具/agent_hub.py --host 0.0.0.0 --ignore-ports 8321
+Restart=always
+RestartSec=3
+StandardOutput=append:/custom_def/empty/串口工具/logs/hub.log
+StandardError=append:/custom_def/empty/串口工具/logs/hub.log
+
+[Install]
+WantedBy=default.target

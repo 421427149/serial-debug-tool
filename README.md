@@ -38,9 +38,22 @@
 ```bash
 pip install pyserial                        # Windows; Linux 用 pip3 install pyserial
 
-bash start_zops.sh                          # 起网关(8300) + 串口实例守护, 自动建 logs/
+# ① 一次性安装常驻服务(推荐): 开机自启 + 崩溃自动重启
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/zops-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now zops-hub zops-keeper
+loginctl enable-linger "$USER"
+
+# ② 或不装服务，临时起一次:
+bash start_zops.sh
+
 # 浏览器打开 http://<主机IP>:8300/           ← 网页终端 + rig 状态条 + 电源按钮
 ```
+
+> 为什么不直接 `nohup`：tmux 服务器被清理或进程被误杀时，tmux 里的实例、keeper、
+> `nohup` 的网关会同时消失（`nohup` 挡不住 SIGKILL，已实际踩过）。交给 systemd 后由
+> `Restart=always` 拉起。详见 [`deploy/systemd/README.md`](deploy/systemd/README.md)。
 
 只想要单块板的传统串口终端（不起网关）：
 
