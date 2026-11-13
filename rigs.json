@@ -54,18 +54,25 @@
       "usb_port_channel": 1,
       "power": {
         "method": "h503",
-        "channel": null,
+        "channel": "12V5",
         "on_value": 1,
         "off_value": 0,
         "discharge_s": 25,
         "note": "2026-11-13 固件已升级为 JSON V3.5(行协议): {\"ch\":\"5V2\",\"st\":1} 控制, {\"qr\":\"通道\"} 可查询(返回 code/mode/st/cnt/tot); 通道名 USB0/USB1/5V2/5V3/12V4/12V5/RST_USB。旧 A5 二进制协议仍保留兼容(rigctl 自动探测)。坑: 裸 ON 无边沿不生效(OFF→放电≥25s→ON); 扩展坞/板卡上的 USB 口供电走 USB0/USB1, 上电顺序先 USB 再板卡电源。"
-      }
+      },
+      "firmware_note": "2026-11-13 用户告知固件已升级(用户称 V5); 协议实测为 JSON V3.5 行协议"
     },
     "target": {
-      "name": "扩展坞上的 TQ3588(待识别)",
-      "console": null,
-      "baud": null,
-      "note": "2026-11-13 用户描述: 两台 3588 直接接在扩展坞(CH344Q 四合一, by-path 1.3.3.x)上, 电源由单片机(H503)控制; 接入的其中一台带 8988 声卡。当前所有通道 st=0(未通电)。上电后跑 rigctl rig-B bind 或人工确认通道映射后填 channel"
+      "name": "TQ3588-8988",
+      "console": "1.2",
+      "baud": 1500000,
+      "enter_loader_cmd": "loader",
+      "alive_check": {
+        "usb_vid_pid": "2207:0006",
+        "note": "运行态 0006; loader=350b; 断电差分实测: 12V5 ON → 1.2 口爆 123KB 启动日志 + USB 0006"
+      },
+      "bound_at": "2026-11-13",
+      "bound_by": "逐路通电差分: 12V5 单独上电 → 1.2 口起量 + USB 2207:0006"
     }
   }
 }
