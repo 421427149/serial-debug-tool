@@ -554,11 +554,14 @@ def act_catch_uboot(rig_name, rig, select_usb=True):
         except Exception:
             pass
         time.sleep(0.3)
-    print(f"{rig_name}: 串口{'就绪' if ready else '未就绪(仍尝试)'}, 密集 Ctrl+C 覆盖倒计时 8s...",
+    print(f"{rig_name}: 串口{'就绪' if ready else '未就绪(仍尝试)'}, 密集抢按键覆盖倒计时 12s...",
           flush=True)
-    for _ in range(64):          # ~8s
+    # Ctrl+C 与回车混发: RK 的 autoboot 提示是 'CTRL+C', 但部分变体(如 FastBoot-MIPI)
+    # 用任意键/回车拦停, 混发两类把命中率拉满。
+    for i in range(96):          # ~12s
+        key = "\x03" if i % 3 else "\r"
         try:
-            _api(base, "POST", "/api/tabs/0/send", {"text": "\x03", "nl": False}, timeout=3)
+            _api(base, "POST", "/api/tabs/0/send", {"text": key, "nl": False}, timeout=3)
         except Exception:
             pass
         time.sleep(0.125)
@@ -586,14 +589,18 @@ def act_catch_uboot(rig_name, rig, select_usb=True):
 
 
 def _h503_state(rig, channel):
-    """读某通道当前通断(JSON 协议有查询; A5 协议无 → 返回 None)。"""
-    proto, _ = h503_detect(rig["controller"]["cmd_port"])
+    """读某通道当前通断(JSON 协议可查; A5/GPIO 治具返回 None 表示"无法回读")。"""
+    ctrl = rig.get("controller") or {}
+    if not str((ctrl.get("power") or {}).get("method", "")).startswith("h503") \
+            or not ctrl.get("cmd_port") or channel is None:
+        return None                     # GPIO 治具没有通道回读能力
+    proto, _ = h503_detect(ctrl["cmd_port"])
     if proto != "json-v3.5":
         return None
     import json as _json
     import serial
-    with _h503_lock(rig["controller"]["cmd_port"]):
-        with serial.Serial(rig["controller"]["cmd_port"], timeout=1.2) as s2:
+    with _h503_lock(ctrl["cmd_port"]):
+        with serial.Serial(ctrl["cmd_port"], timeout=1.2) as s2:
             s2.reset_input_buffer()
             s2.write(_json.dumps({"qr": channel}).encode() + b"\n")
             r = s2.read(200).decode("utf-8", "replace").strip()
@@ -667,11 +674,13 @@ def act_verify(rig_name, rig, rigs_path, all_rigs, only=None, recover=False):
             elif act == "enter-loader":
                 act_enter_loader(rig_name, rig)
                 ok = _usb_has("350b")
-                why = "lsusb 2207:350b" if ok else "未见 350b"
+                why = "lsusb 2207:350b" if ok else \
+                    "未见 350b —— 若下载线未接主机则无法验证(命令本身可能已生效)"
             elif act == "catch-uboot":
                 act_catch_uboot(rig_name, rig, select_usb=True)
                 ok = _usb_has("350b")
-                why = "lsusb 2207:350b" if ok else "未见 350b"
+                why = "lsusb 2207:350b" if ok else \
+                    "未见 350b —— 该板 U-Boot 可能无 autoboot 倒计时(按键会直接落到 Linux shell)"
             else:
                 why = "未知动作"
         except SystemExit as e:

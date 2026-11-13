@@ -44,7 +44,34 @@
         "until": "2026-11-09 14:57",
         "note": "烧录会话期间线被挪回老位置"
       }
-    ]
+    ],
+    "verified": {
+      "off": {
+        "ok": true,
+        "at": "2026-11-13 18:22",
+        "evidence": "控制台 rc=0"
+      },
+      "on": {
+        "ok": true,
+        "at": "2026-11-13 18:22",
+        "evidence": "控制台 rc=0"
+      },
+      "coldboot": {
+        "ok": true,
+        "at": "2026-11-13 18:20",
+        "evidence": "串口新增 5858 字节(板子重启)"
+      },
+      "enter-loader": {
+        "ok": false,
+        "at": "2026-11-13 18:21",
+        "evidence": "未见 350b"
+      },
+      "catch-uboot": {
+        "ok": false,
+        "at": "2026-11-13 18:23",
+        "evidence": "未见 350b"
+      }
+    }
   },
   "rig-B": {
     "controller": {
