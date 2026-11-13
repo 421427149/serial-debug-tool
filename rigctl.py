@@ -12,6 +12,8 @@
     rigctl rig-A off           # 关机(全写 0)
     rigctl rig-A coldboot      # 关机 → 放电 → 开机(冷启动, 全程约 discharge_s+5s)
     rigctl rig-A enter-loader  # 板型核对 → reboot loader → 轮询USB判定模式(全自动)
+    rigctl rig-A verify        # 逐动作真跑+硬证据判定, 结果写入 rigs.json 的 verified
+                               #   --only off,on 只验部分; --recover 验完冷启动回系统
     rigctl rig-A catch-uboot   # 救砖: 冷启动+连发Ctrl+C抓U-Boot菜单+选[3]进Loader
                                #   (内核已panic时唯一入口; 加 --menu 停在菜单不选)
     rigctl rig-A bind          # 重探测受控板: 关电盯哪个串口灭→开电盯哪个醒,
@@ -344,6 +346,33 @@ def usb_mode():
     return f"2207:{pid} → {USB_PID_MODE.get(pid, '未知PID')}"
 
 
+def _wait_prompt(base, timeout=90):
+    """等板子 shell 可用——用哨兵法, 不看提示符。
+
+    为什么不用"输出末尾是提示符"判断: 这块板的内核日志(dwc3/android_work)会
+    持续刷屏, 提示符永远不在末尾, 按末尾判定会一直等不到(实测 90s 超时)。
+    改为发 `echo 标记` 并找标记回显: 只要有回显, 说明 shell 已能执行命令。
+    """
+    marker = "__ZOPS_RDY__"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            _api(base, "POST", "/api/tabs/0/send",
+                 {"text": f"echo {marker}", "nl": True}, timeout=3)
+        except Exception:
+            time.sleep(3)
+            continue
+        time.sleep(2.5)
+        try:
+            txt = _read_offset(base, 2000)
+        except Exception:
+            continue
+        if marker in txt:
+            return True
+        time.sleep(2)
+    return False
+
+
 def act_enter_loader(rig_name, rig):
     """全自动进 Loader: 板型核对 → reboot loader → 轮询 USB 枚举判定模式。
 
@@ -354,6 +383,12 @@ def act_enter_loader(rig_name, rig):
     if not thit:
         raise RigError(3, "受控板控制台无在线实例, 无法下发 reboot loader")
     ap = thit[0]
+    base = f"http://127.0.0.1:{ap}"
+    print(f"{rig_name}: 等 shell 提示符就绪(最多 90s; 刚起来时命令会被启动日志吞掉)...",
+          flush=True)
+    if not _wait_prompt(base):
+        raise RigError(4, "90s 内未见 shell 提示符(板子还在启动/未进系统); "
+                          "等系统起好再试, 或用 catch-uboot")
     model = send_and_read(ap, "cat /proc/device-tree/model", settle=1.0)
     print(f"{rig_name}: 板型核对: {(model or '').strip()[-80:]!r}")
     cmd = (rig.get("target") or {}).get("enter_loader_cmd")
@@ -550,6 +585,120 @@ def act_catch_uboot(rig_name, rig, select_usb=True):
     print(f"{rig_name}: 重试建议: 再跑一次 catch-uboot(多试几次命中率更高)")
 
 
+def _h503_state(rig, channel):
+    """读某通道当前通断(JSON 协议有查询; A5 协议无 → 返回 None)。"""
+    proto, _ = h503_detect(rig["controller"]["cmd_port"])
+    if proto != "json-v3.5":
+        return None
+    import json as _json
+    import serial
+    with _h503_lock(rig["controller"]["cmd_port"]):
+        with serial.Serial(rig["controller"]["cmd_port"], timeout=1.2) as s2:
+            s2.reset_input_buffer()
+            s2.write(_json.dumps({"qr": channel}).encode() + b"\n")
+            r = s2.read(200).decode("utf-8", "replace").strip()
+    try:
+        return _json.loads(r).get("st")
+    except ValueError:
+        return None
+
+
+def _rx_of(rig):
+    """受控板串口实例的实收字节数(判"板子是否有输出"), 拿不到返回 None。"""
+    hit = find_instance(console_chain_of_rig(rig, "target"))
+    if not hit:
+        return None
+    try:
+        return _api(f"http://127.0.0.1:{hit[0]}", "GET", "/api/info",
+                    timeout=6)["data"]["rx_total"]
+    except Exception:
+        return None
+
+
+def _usb_has(pid):
+    return any(x.lower() == pid.lower()
+               for x in re.findall(r"2207:([0-9a-f]{4})", _lsusb(), re.I))
+
+
+def act_verify(rig_name, rig, rigs_path, all_rigs, only=None, recover=False):
+    """逐个动作真跑一遍并用硬证据判定, 结果写回 rigs.json 的 `verified`。
+
+    证据分级(不靠"命令返回成功"):
+      * on/off      → 通道通断回读(JSON 协议可查) 或 控制台 rc 哨兵
+      * coldboot    → 受控串口实收字节是否增长(板子真的重启了)
+      * enter-loader / catch-uboot → lsusb 是否出现 2207:350b(真进 Loader)
+    没验过的动作, 网页按钮会显示 ⚠ —— 避免"按钮摆着但点了没用"。
+    """
+    acts = only or ["off", "on", "coldboot", "enter-loader", "catch-uboot"]
+    p = rig["controller"]["power"]
+    ch = p.get("channel")
+    results = {}
+    print(f"{rig_name}: 验证明细 ————————————————", flush=True)
+
+    for act in acts:
+        ok, why = False, ""
+        try:
+            if act == "off":
+                act_power(rig_name, rig, p.get("off_value", 0), "关机")
+                st = _h503_state(rig, ch)
+                ok = (st == 0) if st is not None else True
+                why = f"通道回读 st={st}" if st is not None else "控制台 rc=0"
+            elif act == "on":
+                act_power(rig_name, rig, p.get("on_value", 1), "开机")
+                st = _h503_state(rig, ch)
+                ok = (st == 1) if st is not None else True
+                why = f"通道回读 st={st}" if st is not None else "控制台 rc=0"
+            elif act == "coldboot":
+                before = _rx_of(rig) or 0
+                act_power(rig_name, rig, p.get("off_value", 0), "关机")
+                wait = int(p.get("discharge_s", 20))
+                print(f"{rig_name}: 放电 {wait}s ...", flush=True)
+                time.sleep(wait)
+                act_power(rig_name, rig, p.get("on_value", 1), "开机")
+                grew = 0
+                for _ in range(20):
+                    time.sleep(2)
+                    now = _rx_of(rig)
+                    if now and now > before + 200:
+                        grew = now - before
+                        break
+                ok = grew > 0
+                why = f"串口新增 {grew} 字节(板子重启)" if ok else "40s 内串口无新增"
+            elif act == "enter-loader":
+                act_enter_loader(rig_name, rig)
+                ok = _usb_has("350b")
+                why = "lsusb 2207:350b" if ok else "未见 350b"
+            elif act == "catch-uboot":
+                act_catch_uboot(rig_name, rig, select_usb=True)
+                ok = _usb_has("350b")
+                why = "lsusb 2207:350b" if ok else "未见 350b"
+            else:
+                why = "未知动作"
+        except SystemExit as e:
+            why = f"失败: {e}"
+        except Exception as e:
+            why = f"异常: {e}"
+        results[act] = {"ok": ok, "at": time.strftime("%Y-%m-%d %H:%M"),
+                        "evidence": why}
+        print(f"  {'✔' if ok else '✘'} {act:<13} {why}", flush=True)
+
+    rig.setdefault("verified", {}).update(results)
+    save_rigs(rigs_path, all_rigs)
+
+    if recover:
+        print(f"{rig_name}: 验证后恢复系统(coldboot)...", flush=True)
+        try:
+            act_power(rig_name, rig, p.get("off_value", 0), "关机")
+            time.sleep(int(p.get("discharge_s", 20)))
+            act_power(rig_name, rig, p.get("on_value", 1), "开机")
+            print(f"{rig_name}: 已上电, 板子开始启动", flush=True)
+        except SystemExit as e:
+            print(f"{rig_name}: 恢复失败: {e}", flush=True)
+
+    passed = sum(1 for v in results.values() if v["ok"])
+    print(f"{rig_name}: {passed}/{len(results)} 项通过, 结果已写入 rigs.json", flush=True)
+
+
 def usb_alive(target):
     vidpid = (target.get("alive_check") or {}).get("usb_vid_pid")
     if not vidpid:
@@ -734,6 +883,12 @@ def main():
         act_enter_loader(name, rig)
     elif action == "catch-uboot":
         act_catch_uboot(name, rig, select_usb="--menu" not in args)
+    elif action == "verify":
+        only = None
+        if "--only" in args:
+            only = args[args.index("--only") + 1].split(",")
+        act_verify(name, rig, rigs_path, rigs, only=only,
+                   recover="--recover" in args)
     else:
         raise RigError(2, f"未知动作 {action!r}(status/on/off/coldboot/bind)")
 

@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.9"
+HUB_VERSION = "3.0"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -445,6 +445,7 @@ class Hub:
                                "detail": f"实例{thit['agent_port']}" if thit else "无实例",
                                "tab": thit["agent_port"] if thit else None,
                                "usb": mode, "enter_loader_cmd": tgt.get("enter_loader_cmd")}
+            entry["verified"] = rig.get("verified") or {}
             entry["last"] = self._rig_out.get(name)
             out.append(entry)
         return out
@@ -896,8 +897,16 @@ async function pollRigs(){try{const d=await jget('/api/rigs');
   if(r.target.enter_loader_cmd)
    actDefs.push(['enter-loader','进Loader',r.name+': 下发 '+r.target.enter_loader_cmd+' 进 Loader 模式?']);
   actDefs.push(['catch-uboot','救砖进Loader',r.name+': 冷启动后抢 U-Boot 菜单并进 Loader(内核已 panic/卡死时用, 会断电重启, 约30秒), 确认?']);
+  const ver=r.verified||{};
   for(const[a,lbl,cfm]of actDefs){
-   const b=document.createElement('button');b.textContent=lbl;b.className='rbtn';
+   const v=ver[a];
+   const mark=v?(v.ok?' ✓':' ✗'):' ⚠';
+   const b=document.createElement('button');b.className='rbtn';
+   b.textContent=lbl+mark;
+   b.title=v?(v.at+' 验证: '+(v.evidence||'')+(v.ok?'':' (未通过)'))
+             :'未验证 —— 跑 rigctl '+r.name+' verify 后此处会标 ✓';
+   if(v&&!v.ok)b.style.borderColor='#c93c37';
+   if(!v)b.style.opacity='0.75';
    b.onclick=async()=>{if(cfm&&!confirm(cfm))return;
     try{await jpost(`/api/rigs/${r.name}/${a}`,{});
      note(r.name+' '+lbl+' 已下发(结果见状态条末行)')}

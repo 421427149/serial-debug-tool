@@ -1,5 +1,4 @@
 {
-  "_说明": "控制组合(rig)登记表: controller=治具常量(永不因换板而变), target=受控槽位(换板/挪线后改这里或跑 rigctl <rig> bind 重探测, 旧绑定进 _history)。console 键写 by-path 链路段(如 1.4.2), 与 boards.json/adbq 同一坐标系; rigctl 也认完整 by-path 串和 ttyUSBx 过渡名",
   "rig-A": {
     "controller": {
       "name": "TQ536",
@@ -74,6 +73,33 @@
       "bound_at": "2026-11-13",
       "bound_by": "逐路通电差分: 12V5 单独上电 → 1.2 口起量 + USB 2207:0006",
       "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot"
+    },
+    "verified": {
+      "off": {
+        "ok": true,
+        "at": "2026-11-13 18:12",
+        "evidence": "通道回读 st=0"
+      },
+      "on": {
+        "ok": true,
+        "at": "2026-11-13 18:13",
+        "evidence": "通道回读 st=1"
+      },
+      "coldboot": {
+        "ok": true,
+        "at": "2026-11-13 18:13",
+        "evidence": "串口新增 51776 字节(板子重启)"
+      },
+      "enter-loader": {
+        "ok": true,
+        "at": "2026-11-13 18:18",
+        "evidence": "lsusb 2207:350b"
+      },
+      "catch-uboot": {
+        "ok": true,
+        "at": "2026-11-13 18:15",
+        "evidence": "lsusb 2207:350b"
+      }
     }
   }
 }
