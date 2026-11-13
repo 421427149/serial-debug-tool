@@ -27,6 +27,8 @@
       各挂各的 hub 分支, 物理上串不了。
 """
 
+import contextlib
+import fcntl
 import http.client
 import json
 import os
@@ -192,6 +194,31 @@ JSON_V35_CHANNELS = ("USB0", "USB1", "5V2", "5V3", "12V4", "12V5", "RST_USB",
 H503_ACK = {0: "成功", 1: "长度错", 2: "校验错", 3: "状态错"}
 
 
+@contextlib.contextmanager
+def _h503_lock(cmd_port):
+    """H503 命令口的跨进程互斥锁。
+
+    网关(线程)与 rigctl(子进程)都会开这个 CDC 口; 撞上时后者 open 直接失败。
+    用 flock 让它们排队——flock 对同进程的不同 fd 之间也生效, 所以线程也覆盖。
+    """
+    import hashlib
+    tag = hashlib.md5(cmd_port.encode()).hexdigest()[:8]
+    path = f"/tmp/zops-h503-{tag}.lock"
+    try:
+        ef = open(path, "w")
+    except OSError:
+        yield                      # 锁文件建不了就退化为无锁(不阻塞功能)
+        return
+    try:
+        fcntl.flock(ef, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(ef, fcntl.LOCK_UN)
+        finally:
+            ef.close()
+
+
 def _h503_xact(cmd_port, frame, timeout=1.5, retries=3):
     """独占打开命令口发一帧读回帧(CDC 无波特率意义), 用完即关。
 
@@ -202,13 +229,14 @@ def _h503_xact(cmd_port, frame, timeout=1.5, retries=3):
     last = None
     for i in range(retries):
         try:
-            with serial.Serial(cmd_port, timeout=timeout) as s:
-                s.reset_input_buffer()
-                s.write(frame)
-                return s.read(64)
+            with _h503_lock(cmd_port):        # 与网关排队, 避免同时 open 撞车
+                with serial.Serial(cmd_port, timeout=timeout) as s:
+                    s.reset_input_buffer()
+                    s.write(frame)
+                    return s.read(64)
         except (serial.SerialException, OSError, ValueError) as e:
             last = e
-            time.sleep(0.25 * (i + 1))       # 退避, 等对方释放
+            time.sleep(0.25 * (i + 1))
     raise OSError(f"命令口 {cmd_port} 打不开(重试{retries}次): {last}")
 
 

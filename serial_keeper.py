@@ -132,7 +132,18 @@ def load_cfg():
 
 
 def sanitize(name):
-    return name.replace(".", "_").replace(":", "_")
+    """链路段 → tmux 会话名后缀(可逆)。
+
+    tmux 会话名不许含 "." 和 ":", 之前用 "_" 替换是**不可逆**的, 于是
+    `chain in mine` 永远为假 → 每个会话都被当成"适配器已消失", 120s 后遭
+    kill_session, 实例每隔两分钟重启一次(账本清零、端口短暂拒绝连接)。
+    改成可逆编码: "." <-> "-", ":" <-> "~"(链路段里只有数字/点/冒号, 安全)。
+    """
+    return name.replace(".", "-").replace(":", "~")
+
+
+def unsanitize(session_suffix):
+    return session_suffix.replace("~", ":").replace("-", ".")
 
 
 def spawn(chain, filename, baud):
@@ -159,7 +170,8 @@ def kill_session(session):
 def cycle(cfg, quiet=False):
     chains = bypath_chains(cfg)
     targets = running_targets()
-    mine = {s[len(PREFIX):]: s for s in tmux_sessions() if s.startswith(PREFIX)}
+    mine = {unsanitize(s[len(PREFIX):]): s
+            for s in tmux_sessions() if s.startswith(PREFIX)}
     now = time.time()
     log = []
 

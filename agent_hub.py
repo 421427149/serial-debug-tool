@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-HUB_VERSION = "2.7"
+HUB_VERSION = "2.9"
 MAX_BODY_BYTES = 1024 * 1024          # 与 agent_http.py 同限, 转发体不做放大
 PROBE_WORKERS = 16                    # 扫描区间并行探测线程数
 INSTANCE_NAME = "serial_debug"        # /api/status 名字非此者不收编(避免误收别的 HTTP 服务)
@@ -461,18 +461,33 @@ class Hub:
         def worker():
             # 子进程执行 rigctl: 彻底隔离输出——redirect_stdout 是进程全局,
             # 会把别的线程(如 hub 自己的实例集合日志)的 print 一起抓进来(已实测踩到)。
-            cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                "rigctl.py"), name, action]
+            # -u: 子进程 stdout 走管道时默认块缓冲, 不加它"实时进度"会变一次性输出
+            cmd = [sys.executable, "-u",
+                   os.path.join(os.path.dirname(os.path.abspath(__file__)), "rigctl.py"),
+                   name, action]
+            lines = []
             try:
                 with self._rig_lock:
-                    r = subprocess.run(cmd, capture_output=True, text=True,
-                                       timeout=180)
-                out = (r.stdout or "").strip() or (r.stderr or "").strip() or "(无输出)"
-                tail = "\n".join(out.splitlines()[-3:])     # 状态条只放末几行
+                    # 逐行读子进程输出并实时更新状态条: 冷启动有 25s 放电静默期,
+                    # 攒到最后才更新会让人以为"只关了没开"(实测反馈)。
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    for line in proc.stdout or ():
+                        line = line.rstrip("\n")
+                        if not line:
+                            continue
+                        lines.append(line)
+                        self._rig_out[name] = (time.strftime("%H:%M:%S ")
+                                               + f"[{action}] " + " ⟶ ".join(lines[-3:]))
+                    proc.wait(timeout=180)
+                    if proc.returncode not in (0, None):
+                        lines.append(f"[退出码 {proc.returncode}]")
             except subprocess.TimeoutExpired:
-                tail = f"[超时] {action} 超过 180s 未结束"
+                proc.kill()
+                lines.append(f"[超时] {action} 超过 180s")
             except Exception as e:
-                tail = f"[异常] {e}"
+                lines.append(f"[异常] {e}")
+            tail = " ⟶ ".join(lines[-3:]) if lines else "(无输出)"
             self._rig_out[name] = time.strftime("%H:%M:%S ") + f"[{action}] " + tail
 
         threading.Thread(target=worker, daemon=True).start()
