@@ -187,13 +187,24 @@ JSON_V35_CHANNELS = ("USB0", "USB1", "5V2", "5V3", "12V4", "12V5", "RST_USB",
 H503_ACK = {0: "成功", 1: "长度错", 2: "校验错", 3: "状态错"}
 
 
-def _h503_xact(cmd_port, frame, timeout=1.5):
-    """独占打开命令口发一帧读回帧(CDC 无波特率意义), 用完即关。"""
+def _h503_xact(cmd_port, frame, timeout=1.5, retries=3):
+    """独占打开命令口发一帧读回帧(CDC 无波特率意义), 用完即关。
+
+    重试是必要的: 网关(网页 rig 状态条)每 5s 也会打开同一命令口探测, 两边撞上时
+    先到者拿到口、后来者 open 直接失败(实测偶发"命令口打不开")。
+    """
     import serial
-    with serial.Serial(cmd_port, timeout=timeout) as s:
-        s.reset_input_buffer()
-        s.write(frame)
-        return s.read(64)
+    last = None
+    for i in range(retries):
+        try:
+            with serial.Serial(cmd_port, timeout=timeout) as s:
+                s.reset_input_buffer()
+                s.write(frame)
+                return s.read(64)
+        except (serial.SerialException, OSError, ValueError) as e:
+            last = e
+            time.sleep(0.25 * (i + 1))       # 退避, 等对方释放
+    raise OSError(f"命令口 {cmd_port} 打不开(重试{retries}次): {last}")
 
 
 def h503_detect(cmd_port):

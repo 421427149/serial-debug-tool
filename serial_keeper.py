@@ -49,17 +49,41 @@ def tmux_sessions():
     return [] if r.returncode else [x for x in r.stdout.splitlines() if x]
 
 
-def bypath_chains():
-    """by-path 目录里的单口适配器: 返回 {链路段: 完整文件名}。"""
+def _split_chain(name):
+    """by-path 文件名 → (链路段, 该适配器内的接口号或 None)。
+
+    "…usb-0:1.4.1:1.0-port0" → ("1.4.1", None)     单口 CH340(键沿用旧式, 兼容既有配置)
+    "…usb-0:1.3.3:1.2"       → ("1.3.3", "1.2")    多口 CH344Q(需带接口号才唯一)
+    """
+    m = re.search(r"usb-([\d.:]+)", name)
+    if not m:
+        return None, None
+    parts = m.group(1).split(":")            # ["0", "1.4.1", "1.0"]
+    if len(parts) < 2:
+        return m.group(1), None
+    if name.endswith("-port0"):
+        return parts[1], None
+    return parts[1], (parts[2] if len(parts) > 2 else None)
+
+
+def bypath_chains(cfg=None):
+    """可管理的串口: 默认只收单口适配器(-port0)。
+
+    多口适配器(CH344Q 四合一扩展坞)不满足单口规则会被漏掉, 需在 keeper.json 的
+    "manage" 里显式列出(键形如 "1.3.3:1.2"), 才会接管——避免误把 H503 命令口
+    等非板卡调试口当控制台打开。
+    """
+    allow = set((cfg or {}).get("manage") or [])
     out = {}
     try:
         for name in os.listdir("/dev/serial/by-path"):
-            if name.endswith("-port0"):
-                m = re.search(r"usb-([\d.:]+)", name)
-                if m:
-                    segs = m.group(1).split(":")
-                    chain = segs[1] if len(segs) > 1 else segs[0]
-                    out[chain] = name
+            chain, iface = _split_chain(name)
+            if not chain:
+                continue
+            if iface is None:
+                out[chain] = name                      # 单口: 老规则
+            elif f"{chain}:{iface}" in allow:
+                out[f"{chain}:{iface}"] = name         # 多口: 仅白名单
     except OSError:
         pass
     return out
@@ -133,7 +157,7 @@ def kill_session(session):
 
 
 def cycle(cfg, quiet=False):
-    chains = bypath_chains()
+    chains = bypath_chains(cfg)
     targets = running_targets()
     mine = {s[len(PREFIX):]: s for s in tmux_sessions() if s.startswith(PREFIX)}
     now = time.time()
@@ -180,7 +204,8 @@ KEEPER_GONE = {}      # chain -> 首次发现消失的时刻
 
 
 def status():
-    chains = bypath_chains()
+    cfg = load_cfg()
+    chains = bypath_chains(cfg)
     targets = running_targets()
     mine = [s for s in tmux_sessions() if s.startswith(PREFIX)]
     print(f"by-path 单口适配器: {sorted(chains)}")
