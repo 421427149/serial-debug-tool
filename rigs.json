@@ -31,8 +31,8 @@
       },
       "bound_at": "2026-11-09 14:57",
       "bound_by": "串口静默排查: 1.4.4 适配器消失, 现场探测 1.4.3 出 TQ3588 提示符",
-      "enter_loader_cmd": "loader",
-      "enter_loader_note": "固件init横幅记载: press ENTER for shell | Ctrl+L or `loader` -> Loader mode (2026-11-08 实测横幅存在)"
+      "enter_loader_cmd": "reboot loader",
+      "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot"
     },
     "_history": [
       {
@@ -51,14 +51,14 @@
     "controller": {
       "name": "H503开关机控制板",
       "cmd_port": "/dev/serial/by-id/usb-STMicroelectronics_STM32_Virtual_ComPort_005F003B3032510235343637-if00",
-      "usb_port_channel": 1,
+      "usb_port_channel": null,
       "power": {
         "method": "h503",
         "channel": "12V5",
         "on_value": 1,
         "off_value": 0,
         "discharge_s": 25,
-        "note": "2026-11-13 固件已升级为 JSON V3.5(行协议): {\"ch\":\"5V2\",\"st\":1} 控制, {\"qr\":\"通道\"} 可查询(返回 code/mode/st/cnt/tot); 通道名 USB0/USB1/5V2/5V3/12V4/12V5/RST_USB。旧 A5 二进制协议仍保留兼容(rigctl 自动探测)。坑: 裸 ON 无边沿不生效(OFF→放电≥25s→ON); 扩展坞/板卡上的 USB 口供电走 USB0/USB1, 上电顺序先 USB 再板卡电源。"
+        "note": "2026-11-13 固件已升级为 JSON V3.5(行协议): {\"ch\":\"5V2\",\"st\":1} 控制, {\"qr\":\"通道\"} 可查询(返回 code/mode/st/cnt/tot); 通道名 USB0/USB1/5V2/5V3/12V4/12V5/RST_USB。旧 A5 二进制协议仍保留兼容(rigctl 自动探测)。坑: 裸 ON 无边沿不生效(OFF→放电≥25s→ON); 扩展坞/板卡上的 USB 口供电走 USB0/USB1, 上电顺序先 USB 再板卡电源。 ※usb_port_channel 置 null: 该板 12V5 单路即可, 且旧 A5 整数通道在新协议下非法"
       },
       "firmware_note": "2026-11-13 用户告知固件已升级(用户称 V5); 协议实测为 JSON V3.5 行协议"
     },
@@ -66,13 +66,14 @@
       "name": "TQ3588-8988",
       "console": "1.2",
       "baud": 1500000,
-      "enter_loader_cmd": "loader",
+      "enter_loader_cmd": "reboot loader",
       "alive_check": {
         "usb_vid_pid": "2207:0006",
         "note": "运行态 0006; loader=350b; 断电差分实测: 12V5 ON → 1.2 口爆 123KB 启动日志 + USB 0006"
       },
       "bound_at": "2026-11-13",
-      "bound_by": "逐路通电差分: 12V5 单独上电 → 1.2 口起量 + USB 2207:0006"
+      "bound_by": "逐路通电差分: 12V5 单独上电 → 1.2 口起量 + USB 2207:0006",
+      "enter_loader_note": "2026-11-13 实测: Debian 上 `command -v loader` 为空(该命令只在 FastBoot/initramfs 环境有), 故改用内核正路 `reboot loader`(rk3588s.dtsi: mode-loader=BOOT_BL_DOWNLOAD); 内核已 panic 时仍用 catch-uboot"
     }
   }
 }

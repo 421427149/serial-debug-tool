@@ -50,6 +50,10 @@ NET_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException)
 class RigError(SystemExit):
     """带退出码的业务错误, 消息前缀 [rigctl]。"""
 
+    def __init__(self, code, message):
+        super().__init__(message)      # SystemExit 只带消息 → str(e) 干净可读
+        self.code = code
+
 
 # ---------------------------------------------------------------- 身份归一化
 
@@ -181,6 +185,7 @@ def power_cmdline(rig, value):
 # JSON V3.5(协议源=tqtools/QSerial 仓 power_board_protocol.py): 行式JSON,
 #   {"ch":名,"st":0/1} 控制, {"qr":名} 查询, 回带 code(0成功); 通道名大小写敏感。
 A5_CH_BY_NAME = {"USB": 0x01, "5V2": 0x02, "5V3": 0x03, "12V4": 0x04, "12V5": 0x05}
+A5_CH_NAME = {0x01: "USB0", 0x02: "5V2", 0x03: "5V3", 0x04: "12V4", 0x05: "12V5"}
 JSON_V35_CHANNELS = ("USB0", "USB1", "5V2", "5V3", "12V4", "12V5", "RST_USB",
                      "PB3", "PB4", "PB5", "PB6", "PB7", "PB8", "PB12", "PB13",
                      "PA8", "PA9", "PA10", "PA15")
@@ -231,6 +236,14 @@ def h503_power(cmd_port, channel, state, protocol="a5-bin"):
         raise RigError(2, "电源通道未绑定: 先跑 bind 差分或人工确认后填 rigs.json")
     if protocol == "json-v3.5":
         import json as _json
+        # 旧配置里通道可能写成 A5 时代的数字(1=USB、2=5V2…), 自动映射成名字,
+        # 否则会发出 {"ch":1,...} 被固件按参数错误(code=2)整条拒绝。
+        if not isinstance(channel, str):
+            channel = A5_CH_NAME.get(int(channel))
+            if channel is None:
+                raise RigError(2, f"JSON 协议要求通道名, 收到 {channel!r}")
+        if channel not in JSON_V35_CHANNELS:
+            raise RigError(2, f"未知通道 {channel!r}; 可用: {', '.join(JSON_V35_CHANNELS)}")
         cmd = _json.dumps({"ch": channel, "st": int(state)}, separators=(",", ":"))
         reply = _h503_xact(cmd_port, cmd.encode() + b"\n")
         try:
